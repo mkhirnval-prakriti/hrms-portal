@@ -95,6 +95,9 @@ function migrate(db) {
       /* ignore */
     }
   }
+  tryAddColumn(db, "users", "mobile TEXT");
+  tryAddColumn(db, "users", "department TEXT");
+
   const attCols = [
     ["punch_in_address", "TEXT"],
     ["punch_out_address", "TEXT"],

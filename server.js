@@ -50,6 +50,24 @@ app.use(
 
 app.use("/api", apiRouter);
 
+/** Same handlers without `/api` prefix (mobile apps / Postman spec). */
+function forwardToApiRouter(suffixPath) {
+  return (req, res, next) => {
+    const q = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    req.url = suffixPath + q;
+    apiRouter(req, res, next);
+  };
+}
+
+app.post("/login", express.json({ limit: "1mb" }), forwardToApiRouter("/login"));
+app.get("/attendance", forwardToApiRouter("/attendance"));
+app.post("/attendance/checkin", express.json({ limit: "1mb" }), forwardToApiRouter("/attendance/checkin"));
+app.post("/attendance/checkout", express.json({ limit: "1mb" }), forwardToApiRouter("/attendance/checkout"));
+app.get("/employees", forwardToApiRouter("/employees"));
+app.post("/employees", express.json({ limit: "1mb" }), forwardToApiRouter("/employees"));
+app.get("/logs", forwardToApiRouter("/logs"));
+app.get("/reports", forwardToApiRouter("/reports"));
+
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.get("/", (req, res) => {

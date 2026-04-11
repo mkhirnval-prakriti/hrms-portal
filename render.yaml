@@ -21,6 +21,11 @@ services:
         value: /data/hrms.sqlite
       - key: SESSION_SECRET
         generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      # Optional: MongoDB not used — app uses SQLite on persistent disk (DB_PATH).
+      # - key: MONGO_URI
+      #   sync: false
       - key: INTEGRATION_SECRET
         generateValue: true
       - key: GOOGLE_APPS_SCRIPT_WEBAPP_URL

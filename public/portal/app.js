@@ -1,15 +1,95 @@
-/* global fetch, document, window, location, FormData */
+/* global fetch, document, window, location, FormData, navigator */
 
 const appEl = document.getElementById("app");
+const loaderEl = document.getElementById("ph-loader");
+const toastRoot = document.getElementById("ph-toasts");
 
 let me = null;
+let deferredPrompt = null;
+
+function showLoader() {
+  if (loaderEl) loaderEl.classList.remove("hidden");
+}
+function hideLoader() {
+  if (loaderEl) loaderEl.classList.add("hidden");
+}
+
+function toast(msg, type = "ok") {
+  if (!toastRoot) return;
+  const el = document.createElement("div");
+  el.className = `ph-toast ${type === "err" ? "err" : "ok"}`;
+  el.textContent = msg;
+  toastRoot.appendChild(el);
+  setTimeout(() => el.remove(), 4800);
+}
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+});
+
+function wireInstallButton() {
+  const btn = document.getElementById("phInstallBtn");
+  if (!btn) return;
+  if (!deferredPrompt) {
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  btn.onclick = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    btn.classList.add("hidden");
+    toast("App install prompt completed.");
+  };
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/portal/sw.js", { scope: "/portal/" }).catch(() => {});
+  });
+}
+
+function roleDisplay() {
+  if (!me) return "";
+  const map = {
+    SUPER_ADMIN: "Administrator",
+    ATTENDANCE_MANAGER: "Attendance Manager",
+    LOCATION_MANAGER: "Location Manager",
+    USER: "Staff",
+  };
+  return map[me.role] || me.role;
+}
+
+function getJwt() {
+  try {
+    return localStorage.getItem("ph_jwt");
+  } catch {
+    return null;
+  }
+}
+
+function setJwt(token) {
+  try {
+    if (token) localStorage.setItem("ph_jwt", token);
+    else localStorage.removeItem("ph_jwt");
+  } catch {
+    /* ignore */
+  }
+}
 
 async function api(path, options = {}) {
   const isForm =
     typeof FormData !== "undefined" && options.body instanceof FormData;
+  const token = !isForm ? getJwt() : null;
   const headers = isForm
     ? { ...(options.headers || {}) }
     : { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (token && !headers.Authorization) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const res = await fetch("/api" + path, {
     credentials: "include",
     headers,
@@ -52,10 +132,25 @@ function layoutShell(title, inner) {
   if (kiosk) {
     return `<div class="kiosk">${inner}</div>`;
   }
+  const initials =
+    me && me.full_name
+      ? me.full_name
+          .split(/\s+/)
+          .map((s) => s[0])
+          .slice(0, 2)
+          .join("")
+          .toUpperCase()
+      : "?";
   return `
     <div class="layout">
       <aside class="sidebar">
-        <div class="brand">Prakriti HRMS</div>
+        <div class="sidebar-brand">
+          <img src="/portal/assets/logo.png" alt="Prakriti Herbs" />
+          <div class="titles">
+            <strong>Prakriti Herbs</strong>
+            <span>Ayurveda · HRMS</span>
+          </div>
+        </div>
         <div class="nav-section">Main</div>
         <nav class="nav">
           ${navLink("dashboard", "Dashboard", ["dashboard:read", "dashboard:read_self"])}
@@ -63,30 +158,55 @@ function layoutShell(title, inner) {
         <div class="nav-section">Attendance</div>
         <nav class="nav">
           ${navLink("attendance/punch", "Punch In / Out", "attendance:punch")}
-          ${navLink("attendance/manual", "Manual Entry", "attendance:manual")}
-          ${navLink("attendance/kiosk", "Kiosk Mode", "attendance:kiosk")}
+          <div class="nav-sub">
+            ${navLink("attendance/log", "Attendance Log", ["history:read", "history:read_self"])}
+            ${navLink("attendance/live", "Live Status", ["attendance:read_all", "history:read"])}
+            ${navLink("attendance/monthly", "Monthly Report", "export:read")}
+            ${navLink("attendance/manual", "Manual Entry", "attendance:manual")}
+            ${navLink("attendance/activity", "Activity History", ["history:read", "history:read_self"])}
+          </div>
         </nav>
-        <div class="nav-section">Directory</div>
+        <div class="nav-section">People</div>
         <nav class="nav">
-          ${navLink("users", "Users / Staff", "users:read")}
-          ${navLink("branches", "Branches & GPS", "branches:read")}
-          ${navLink("history", "Attendance History", ["history:read", "history:read_self"])}
-          ${navLink("leave", "Leave requests", ["leave:read_all", "leave:read_self"])}
-          ${navLink("notices", "Notice Board", "notices:read")}
-          ${navLink("roles", "Roles & Permissions", "roles:read")}
-          ${navLink("timings", "Timings / Shifts", "timings:read")}
-          ${navLink("payroll", "Payroll", "settings:write")}
-          ${navLink("settings", "Settings", "settings:read")}
+          ${navLink("employees", "Employees", "users:read")}
+          ${navLink("staff-mgmt", "Staff Mgmt", "timings:read")}
+          ${navLink("leave", "Leave", ["leave:read_all", "leave:read_self"])}
         </nav>
-        <div style="flex:1"></div>
-        <button class="btn secondary" type="button" id="logoutBtn" style="width:100%">Sign out</button>
+        <div class="nav-section">Operations</div>
+        <nav class="nav">
+          ${navLink("attendance/kiosk", "Kiosk Mode", "attendance:kiosk")}
+          ${navLink("trash", "Trash", "settings:write")}
+          ${navLink("office-location", "Office Location", "branches:read")}
+          ${navLink("company", "Company", "settings:read")}
+          ${navLink("notices", "Notice Board", "notices:read")}
+          ${navLink("guide", "System Guide")}
+        </nav>
+        <div class="nav-section">System</div>
+        <nav class="nav">
+          ${navLink("roles", "Roles & Permissions", "roles:read")}
+          ${navLink("settings", "Integrations", "settings:read")}
+          ${navLink("payroll", "Payroll", "settings:write")}
+        </nav>
+        <div style="flex:1;min-height:0"></div>
+        <div class="sidebar-footer">
+          <button type="button" class="btn-install" id="phInstallBtn">Install App</button>
+          <div class="user-pill">
+            <div class="avatar">${initials}</div>
+            <div class="meta">
+              <strong>${me ? me.full_name : ""}</strong>
+              <span>${me ? roleDisplay() : ""}</span>
+            </div>
+          </div>
+          <button class="btn secondary" type="button" id="logoutBtn" style="width:100%">Logout</button>
+        </div>
       </aside>
       <main>
         <div class="topbar">
           <div>
             <h1>${title}</h1>
-            <div class="muted">${me ? `${me.full_name} · ${me.role}${me.login_id ? " · @" + me.login_id : ""}` : ""}</div>
+            <div class="muted">${me ? `${me.full_name} · ${roleDisplay()}${me.login_id ? " · @" + me.login_id : ""}` : ""}</div>
           </div>
+          <img class="topbar-logo" src="/portal/assets/logo.png" alt="" />
         </div>
         ${inner}
       </main>
@@ -102,32 +222,42 @@ async function loadMe() {
 }
 
 async function render() {
-  await loadMe();
-  const route = currentRoute();
-
-  if (!me && route !== "login") {
-    location.hash = "#/login";
-    return renderLogin();
-  }
-  if (me && route === "login") {
-    location.hash = "#/dashboard";
-    return render();
-  }
-
+  showLoader();
   try {
+    await loadMe();
+    const route = currentRoute();
+
+    if (!me && route !== "login") {
+      location.hash = "#/login";
+      return renderLogin();
+    }
+    if (me && route === "login") {
+      location.hash = "#/dashboard";
+      return render();
+    }
+
     if (route === "login") return renderLogin();
     if (route === "dashboard") return await renderDashboard();
     if (route === "attendance/punch") return await renderPunch();
     if (route === "attendance/manual") return await renderManual();
     if (route === "attendance/kiosk") return await renderKiosk();
-    if (route === "users") return await renderUsers();
-    if (route === "branches") return await renderBranches();
-    if (route === "history") return await renderHistory();
+    if (route === "attendance/log" || route === "history") return await renderHistory();
+    if (route === "attendance/live") return await renderLiveStatus();
+    if (route === "attendance/monthly") return await renderMonthlyReport();
+    if (route === "attendance/activity") {
+      if (me.role === "SUPER_ADMIN") return await renderAuditLogs();
+      return await renderHistory();
+    }
+    if (route === "users" || route === "employees") return await renderUsers();
+    if (route === "branches" || route === "office-location") return await renderBranches();
     if (route === "leave") return await renderLeave();
     if (route === "notices") return await renderNotices();
     if (route === "roles") return await renderRoles();
-    if (route === "timings") return await renderTimings();
+    if (route === "timings" || route === "staff-mgmt") return await renderTimings();
     if (route === "settings") return await renderSettings();
+    if (route === "company") return await renderCompany();
+    if (route === "trash") return await renderTrash();
+    if (route === "guide") return await renderGuide();
     if (route === "payroll") return await renderPayroll();
     appEl.innerHTML = layoutShell("Not found", `<p class="muted">Unknown route.</p>`);
   } catch (e) {
@@ -135,15 +265,24 @@ async function render() {
       "Error",
       `<p class="error">${e.message || "Unexpected error"}</p>`
     );
+    toast(e.message || "Error", "err");
+  } finally {
+    hideLoader();
+    wireLogout();
+    wireInstallButton();
   }
-  wireLogout();
 }
 
 function wireLogout() {
   const b = document.getElementById("logoutBtn");
   if (!b) return;
   b.onclick = async () => {
-    await api("/auth/logout", { method: "POST" });
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      /* still clear client */
+    }
+    setJwt(null);
     me = null;
     location.hash = "#/login";
     render();
@@ -151,10 +290,15 @@ function wireLogout() {
 }
 
 function renderLogin() {
+  hideLoader();
   appEl.innerHTML = `
     <div class="login-wrap">
-      <h1>HRMS Sign in</h1>
-      <p class="muted">Multi-device sessions supported.</p>
+      <div class="login-brand">
+        <img src="/portal/assets/logo.png" alt="Prakriti Herbs Ayurveda" width="120" height="120" />
+        <h1>Prakriti Herbs HRMS</h1>
+        <div class="tagline">Ayurveda · Secure sign in</div>
+      </div>
+      <p class="muted" style="text-align:center">Multi-device sessions supported.</p>
       <form id="loginForm">
         <label class="muted">Email or user ID</label>
         <input name="email" type="text" required autocomplete="username" placeholder="e.g. prakritiherbs" />
@@ -163,7 +307,7 @@ function renderLogin() {
         <p class="error" id="loginErr" style="min-height:1rem"></p>
         <button class="btn" type="submit">Continue</button>
       </form>
-      <p class="muted" style="margin-top:1rem;font-size:0.82rem">
+      <p class="muted" style="margin-top:1rem;font-size:0.82rem;text-align:center">
         Super Admin seed: <code>prakritiherbs</code> / <code>Prakriti@123</code> (override with
         <code>SEED_ADMIN_PASSWORD</code>)
       </p>
@@ -173,13 +317,19 @@ function renderLogin() {
     const fd = new FormData(ev.target);
     const body = { email: fd.get("email"), password: fd.get("password") };
     try {
-      await api("/auth/login", { method: "POST", body: JSON.stringify(body) });
+      const data = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (data && data.token) setJwt(data.token);
+      toast("Signed in successfully.");
       location.hash = "#/dashboard";
       render();
     } catch (err) {
       document.getElementById("loginErr").textContent = err.message;
     }
   };
+  wireInstallButton();
 }
 
 async function renderDashboard() {
@@ -526,7 +676,7 @@ async function renderKiosk() {
 
 async function renderUsers() {
   if (!can("users:read")) {
-    appEl.innerHTML = layoutShell("Users", `<p class="error">No access.</p>`);
+    appEl.innerHTML = layoutShell("Employees", `<p class="error">No access.</p>`);
     return wireLogout();
   }
   const { users } = await api("/users");
@@ -559,11 +709,28 @@ async function renderUsers() {
     : "";
 
   appEl.innerHTML = layoutShell(
-    "Users / Staff",
+    "Employees",
     `${createForm}
-     <div class="card"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Branch</th><th>Shift</th></tr></thead>
+     <div class="row" style="margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap;align-items:center">
+       <input id="empSearch" type="search" placeholder="Search employees…" style="min-width:200px;flex:1" />
+       ${
+         can("export:read")
+           ? '<a class="btn secondary" href="/api/employees/export.csv" target="_blank" rel="noopener">Download employee list (CSV)</a>'
+           : ""
+       }
+     </div>
+     <div class="card"><table id="empTable"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Branch</th><th>Shift</th></tr></thead>
      <tbody>${rows}</tbody></table></div>`
   );
+  const empSearchEl = document.getElementById("empSearch");
+  if (empSearchEl) {
+    empSearchEl.oninput = () => {
+      const q = empSearchEl.value.trim().toLowerCase();
+      document.querySelectorAll("#empTable tbody tr").forEach((tr) => {
+        tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    };
+  }
   const form = document.getElementById("userCreate");
   if (form) {
     form.onsubmit = async (ev) => {
@@ -591,7 +758,7 @@ async function renderUsers() {
 
 async function renderBranches() {
   if (!can("branches:read")) {
-    appEl.innerHTML = layoutShell("Branches", `<p class="error">No access.</p>`);
+    appEl.innerHTML = layoutShell("Office Location", `<p class="error">No access.</p>`);
     return wireLogout();
   }
   const { branches } = await api("/branches");
@@ -614,7 +781,7 @@ async function renderBranches() {
        </div>`
     : "";
   appEl.innerHTML = layoutShell(
-    "Branches & GPS",
+    "Office Location",
     `${form}<div class="card"><table><thead><tr><th>Name</th><th>Lat</th><th>Lng</th><th>Radius</th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
   const bf = document.getElementById("branchForm");
@@ -645,14 +812,24 @@ async function renderHistory() {
     appEl.innerHTML = layoutShell("History", `<p class="error">No access.</p>`);
     return wireLogout();
   }
+  const route = currentRoute();
+  const pageTitle =
+    route === "attendance/log"
+      ? "Attendance Log"
+      : route === "attendance/activity"
+        ? "Activity History"
+        : "Attendance History";
+  const hideEditor = route === "attendance/activity";
   const params = new URLSearchParams();
   const uid = document.getElementById("hUser")?.value;
   const st = document.getElementById("hStatus")?.value;
   if (uid) params.set("userId", uid);
   if (st) params.set("status", st);
   const data = await api("/attendance/history?" + params.toString());
-  const editor = can("history:edit")
-    ? `<div class="card" style="margin-top:1rem">
+  const records = data.records || [];
+  const editor =
+    !hideEditor && can("history:edit")
+      ? `<div class="card" style="margin-top:1rem">
          <h3>Full edit (record id)</h3>
          <p class="muted" style="font-size:0.85rem">Use for half ↔ full day, past/future corrections, and notes.</p>
          <div class="grid" style="gap:0.45rem;margin-top:0.5rem">
@@ -667,11 +844,25 @@ async function renderHistory() {
            <p class="muted" id="eMsg"></p>
          </div>
        </div>`
-    : "";
+      : hideEditor
+        ? `<p class="muted" style="margin-top:0.75rem;font-size:0.88rem">यह लॉग केवल पढ़ने के लिए है · Read-only activity history</p>`
+        : "";
+
+  const tbody =
+    records.length === 0
+      ? `<tr><td colspan="7"><p class="ph-empty">कोई activity नहीं मिली · No records for this filter.</p></td></tr>`
+      : records
+          .map(
+            (r) => `<tr data-row="1">
+      <td>${r.id}</td><td>${r.work_date}</td><td>${r.full_name || ""}</td><td>${r.status}</td>
+      <td>${r.punch_in_at || "—"}</td><td>${r.punch_out_at || "—"}</td><td>${r.source}</td>
+    </tr>`
+          )
+          .join("");
 
   appEl.innerHTML = layoutShell(
-    "Attendance history",
-    `<div class="row" style="margin-bottom:0.75rem;gap:0.5rem">
+    pageTitle,
+    `<div class="row" style="margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap">
        ${
          can("history:read")
            ? '<input id="hUser" placeholder="filter user id" />'
@@ -681,23 +872,26 @@ async function renderHistory() {
          <option value="">All status</option>
          <option>present</option><option>absent</option><option>late</option><option>half</option><option>leave</option>
        </select>
+       <input id="hSearch" type="search" placeholder="Search table…" style="min-width:160px" />
        <button class="btn secondary" type="button" id="hApply">Apply</button>
        ${
          can("export:read")
-           ? '<button class="btn ghost" type="button" id="exportCsv">Export CSV</button><button class="btn ghost" type="button" id="exportXlsx">Export Excel (.xlsx)</button>'
+           ? '<button class="btn ghost" type="button" id="exportCsv">Export CSV</button><button class="btn ghost" type="button" id="exportXlsx">Download Excel</button>'
            : ""
        }
      </div>
-     <div class="card"><table><thead><tr><th>Id</th><th>Date</th><th>User</th><th>Status</th><th>In</th><th>Out</th><th>Source</th></tr></thead>
-     <tbody>${(data.records || [])
-       .map(
-         (r) => `<tr>
-      <td>${r.id}</td><td>${r.work_date}</td><td>${r.full_name || ""}</td><td>${r.status}</td>
-      <td>${r.punch_in_at || "—"}</td><td>${r.punch_out_at || "—"}</td><td>${r.source}</td>
-    </tr>`
-       )
-       .join("")}</tbody></table></div>${editor}`
+     <div class="card"><table id="histTable"><thead><tr><th>Id</th><th>Date</th><th>User</th><th>Status</th><th>In</th><th>Out</th><th>Source</th></tr></thead>
+     <tbody>${tbody}</tbody></table></div>${editor}`
   );
+  const search = document.getElementById("hSearch");
+  if (search) {
+    search.oninput = () => {
+      const q = search.value.trim().toLowerCase();
+      document.querySelectorAll("#histTable tbody tr[data-row]").forEach((tr) => {
+        tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    };
+  }
   document.getElementById("hApply").onclick = () => render();
   const ex = document.getElementById("exportCsv");
   if (ex) {
@@ -745,6 +939,251 @@ async function renderHistory() {
       }
     };
   }
+  wireLogout();
+}
+
+function parseCsvRows(text) {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { headers: [], rows: [] };
+  const parseLine = (line) => {
+    const out = [];
+    let cur = "";
+    let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (q && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else q = !q;
+      } else if (!q && c === ",") {
+        out.push(cur);
+        cur = "";
+      } else cur += c;
+    }
+    out.push(cur);
+    return out;
+  };
+  const headers = parseLine(lines[0]);
+  const rows = lines.slice(1).map(parseLine);
+  return { headers, rows };
+}
+
+async function renderLiveStatus() {
+  if (!can("attendance:read_all") && !can("history:read")) {
+    appEl.innerHTML = layoutShell("Live Status", `<p class="error">No access.</p>`);
+    return wireLogout();
+  }
+  const data = await api("/attendance/live-status");
+  const inside = data.currently_in || [];
+  const tbody =
+    inside.length === 0
+      ? `<tr><td colspan="6"><p class="ph-empty">अभी कोई भी checked-in नहीं है · No active punch without checkout.</p></td></tr>`
+      : inside
+          .map(
+            (r) => `<tr>
+    <td>${r.full_name || ""}</td>
+    <td>${r.email || ""}</td>
+    <td>${r.login_id || "—"}</td>
+    <td>${r.work_date || ""}</td>
+    <td>${r.punch_in_at || "—"}</td>
+    <td>${r.status || ""}</td>
+  </tr>`
+          )
+          .join("");
+  appEl.innerHTML = layoutShell(
+    "Live Status",
+    `<p class="muted">Date: <strong>${data.date || ""}</strong> · Staff currently checked in (no punch out yet).</p>
+    <div class="card"><table><thead><tr><th>Name</th><th>Email</th><th>Login</th><th>Work date</th><th>Punch in</th><th>Status</th></tr></thead>
+    <tbody>${tbody}</tbody></table></div>`
+  );
+  wireLogout();
+}
+
+async function renderMonthlyReport() {
+  if (!can("export:read")) {
+    appEl.innerHTML = layoutShell("Monthly Report", `<p class="error">No access.</p>`);
+    return wireLogout();
+  }
+  const now = new Date();
+  const y0 = document.getElementById("mrYear")?.value;
+  const m0 = document.getElementById("mrMonth")?.value;
+  const y = y0 ? Number(y0) : now.getFullYear();
+  const m = m0 ? Number(m0) : now.getMonth() + 1;
+  const pad = (n) => String(n).padStart(2, "0");
+  const years = [];
+  for (let yy = now.getFullYear() - 2; yy <= now.getFullYear() + 1; yy++) {
+    years.push(`<option value="${yy}" ${yy === y ? "selected" : ""}>${yy}</option>`);
+  }
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const mm = i + 1;
+    return `<option value="${mm}" ${mm === m ? "selected" : ""}>${pad(mm)}</option>`;
+  }).join("");
+
+  appEl.innerHTML = layoutShell(
+    "Monthly Report",
+    `<div class="card" style="margin-bottom:1rem">
+      <div class="row" style="flex-wrap:wrap;gap:0.75rem;align-items:flex-end">
+        <div>
+          <label class="muted">Year</label><br/>
+          <select id="mrYear">${years.join("")}</select>
+        </div>
+        <div>
+          <label class="muted">Month</label><br/>
+          <select id="mrMonth">${months}</select>
+        </div>
+        <button class="btn secondary" type="button" id="mrApply">Apply</button>
+        <a class="btn" id="mrCsv" href="/api/reports/monthly.csv?year=${y}&month=${m}" target="_blank" rel="noopener">Download CSV</a>
+        <button class="btn ghost" type="button" id="mrPdf">Print / Save as PDF</button>
+        <button class="btn ghost" type="button" id="mrPreview">Load preview</button>
+      </div>
+      <p class="muted" style="margin-top:0.75rem;font-size:0.88rem">
+        Reports respect your role: staff see only their rows. CSV opens in a new tab (download). Use Print to save as PDF from the browser.
+      </p>
+    </div>
+    <div id="mrPrintArea" class="card">
+      <h3 style="margin-top:0">Preview</h3>
+      <p class="muted" id="mrPreviewHint">Choose month and click <strong>Load preview</strong>.</p>
+      <div id="mrPreviewWrap" style="overflow:auto;max-height:480px"></div>
+    </div>`
+  );
+  const syncCsvHref = () => {
+    const yy = document.getElementById("mrYear").value;
+    const mm = document.getElementById("mrMonth").value;
+    document.getElementById("mrCsv").href = `/api/reports/monthly.csv?year=${yy}&month=${mm}`;
+  };
+  document.getElementById("mrYear").onchange = syncCsvHref;
+  document.getElementById("mrMonth").onchange = syncCsvHref;
+  document.getElementById("mrApply").onclick = () => render();
+  document.getElementById("mrPdf").onclick = () => window.print();
+  document.getElementById("mrPreview").onclick = async () => {
+    const yy = document.getElementById("mrYear").value;
+    const mm = document.getElementById("mrMonth").value;
+    const hint = document.getElementById("mrPreviewHint");
+    const wrap = document.getElementById("mrPreviewWrap");
+    hint.textContent = "Loading…";
+    wrap.innerHTML = "";
+    try {
+      const res = await fetch(`/api/reports/monthly.csv?year=${yy}&month=${mm}`, {
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const text = await res.text();
+      const { headers, rows } = parseCsvRows(text);
+      if (!headers.length) {
+        hint.textContent = "कोई डेटा नहीं · No rows.";
+        return;
+      }
+      hint.textContent = `${rows.length} rows · ${yy}-${pad(mm)}`;
+      const th = headers.map((h) => `<th>${h}</th>`).join("");
+      const tb = rows
+        .map((cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`)
+        .join("");
+      wrap.innerHTML = `<table class="preview-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>`;
+    } catch (e) {
+      hint.textContent = e.message || "Failed";
+      toast(e.message || "Preview failed", "err");
+    }
+  };
+  wireLogout();
+}
+
+async function renderAuditLogs() {
+  if (me.role !== "SUPER_ADMIN") {
+    appEl.innerHTML = layoutShell("Activity History", `<p class="error">Administrator only.</p>`);
+    return wireLogout();
+  }
+  const { logs } = await api("/audit/logs?limit=500");
+  const list = logs || [];
+  const tbody =
+    list.length === 0
+      ? `<tr><td colspan="6"><p class="ph-empty">कोई audit log नहीं · No entries yet.</p></td></tr>`
+      : list
+          .map(
+            (l) => `<tr data-audit-row="1">
+      <td>${l.id}</td>
+      <td>${l.created_at || ""}</td>
+      <td>${l.actor_name || "—"}</td>
+      <td>${l.action || ""}</td>
+      <td>${l.entity_type || ""} #${l.entity_id ?? "—"}</td>
+      <td><code style="font-size:0.72rem;word-break:break-all">${String(JSON.stringify(l.details || {}))}</code></td>
+    </tr>`
+          )
+          .join("");
+  appEl.innerHTML = layoutShell(
+    "Activity History",
+    `<p class="muted">Permanent audit trail · read-only · cannot edit or delete from the portal.</p>
+     <input type="search" id="auditSearch" placeholder="Search logs…" style="margin-bottom:0.75rem;max-width:320px" />
+     <div class="card"><table id="auditTable"><thead><tr><th>Id</th><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Details</th></tr></thead>
+     <tbody>${tbody}</tbody></table></div>`
+  );
+  const s = document.getElementById("auditSearch");
+  if (s) {
+    s.oninput = () => {
+      const q = s.value.trim().toLowerCase();
+      document.querySelectorAll("#auditTable tbody tr[data-audit-row]").forEach((tr) => {
+        tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    };
+  }
+  wireLogout();
+}
+
+async function renderCompany() {
+  if (!can("settings:read")) {
+    appEl.innerHTML = layoutShell("Company", `<p class="error">No access.</p>`);
+    return wireLogout();
+  }
+  const s = await api("/settings");
+  appEl.innerHTML = layoutShell(
+    "Company",
+    `<div class="card">
+      <h3 style="margin-top:0">Prakriti Herbs Ayurveda</h3>
+      <p class="muted">Organisation profile and session policy (read-only snapshot).</p>
+      <pre style="white-space:pre-wrap;margin:0.75rem 0 0;font-size:0.88rem">${JSON.stringify(s, null, 2)}</pre>
+    </div>
+    <p class="muted" style="margin-top:1rem"><a href="#/settings">Open Integrations &amp; Google sync →</a></p>`
+  );
+  wireLogout();
+}
+
+function renderTrash() {
+  if (!can("settings:write")) {
+    appEl.innerHTML = layoutShell("Trash", `<p class="error">No access.</p>`);
+    return wireLogout();
+  }
+  appEl.innerHTML = layoutShell(
+    "Trash",
+    `<div class="card">
+      <p class="ph-empty" style="margin:0">कोई हटाई गई वस्तु नहीं · Trash is empty.</p>
+      <p class="muted" style="margin-top:0.75rem;font-size:0.88rem">Deleted records will appear here when soft-delete is enabled for modules.</p>
+    </div>`
+  );
+  wireLogout();
+}
+
+function renderGuide() {
+  appEl.innerHTML = layoutShell(
+    "System Guide",
+    `<div class="grid" style="gap:1rem">
+      <div class="card">
+        <h3 style="margin-top:0">Attendance</h3>
+        <p class="muted">Use <strong>Punch In / Out</strong> with GPS for fence validation. Kiosk mode is for shared devices. Manual entry is for corrections by authorised staff.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Exports</h3>
+        <p class="muted">Download attendance from <strong>Attendance Log</strong> (CSV / Excel). Monthly reports and employee lists require export permission.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">PWA</h3>
+        <p class="muted">Install this portal from the sidebar for a full-screen app experience. Basic offline caching applies to shell assets.</p>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Roles</h3>
+        <p class="muted"><strong>Admin</strong> sees organisation-wide data and audit logs. <strong>Staff</strong> sees self-service views where permitted.</p>
+      </div>
+    </div>`
+  );
   wireLogout();
 }
 
@@ -905,7 +1344,7 @@ async function renderRoles() {
 
 async function renderTimings() {
   if (!can("timings:read") && !can("timings:read_self")) {
-    appEl.innerHTML = layoutShell("Timings", `<p class="error">No access.</p>`);
+    appEl.innerHTML = layoutShell("Staff Mgmt", `<p class="error">No access.</p>`);
     return wireLogout();
   }
   if (can("timings:read_self") && !can("timings:read")) {
@@ -930,7 +1369,7 @@ async function renderTimings() {
     )
     .join("");
   appEl.innerHTML = layoutShell(
-    "Timings / shift management",
+    "Staff Mgmt",
     `<div class="card"><table><thead><tr><th>User</th><th>Start</th><th>End</th><th>Grace</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
   );
   document.querySelectorAll(".btn-edit").forEach((btn) => {
@@ -968,7 +1407,7 @@ async function renderPayroll() {
 
 async function renderSettings() {
   if (!can("settings:read")) {
-    appEl.innerHTML = layoutShell("Settings", `<p class="error">No access.</p>`);
+    appEl.innerHTML = layoutShell("Integrations", `<p class="error">No access.</p>`);
     return wireLogout();
   }
   const s = await api("/settings");
@@ -1057,7 +1496,7 @@ async function renderSettings() {
     : "";
 
   appEl.innerHTML = layoutShell(
-    "Settings",
+    "Integrations",
     `<div class="card"><pre style="white-space:pre-wrap;margin:0">${JSON.stringify(
       s,
       null,

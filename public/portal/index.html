@@ -2,11 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>HRMS Portal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#2e7d32" />
+    <meta name="description" content="Prakriti Herbs Ayurveda — HRMS Portal" />
+    <link rel="manifest" href="/portal/manifest.json" />
+    <link rel="apple-touch-icon" href="/portal/assets/logo.png" />
+    <title>Prakriti Herbs — HRMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="/portal/app.css" />
   </head>
   <body>
+    <div id="ph-loader">
+      <img class="ph-loader-logo" src="/portal/assets/logo.png" alt="" width="88" height="88" />
+      <div class="ph-loader-sub">Prakriti Herbs Ayurveda</div>
+    </div>
+    <div id="ph-toasts" aria-live="polite"></div>
     <div id="app"></div>
     <script src="/portal/app.js" defer></script>
   </body>

@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const express = require("express");
 const multer = require("multer");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const ExcelJS = require("exceljs");
 const { can, requirePerm, listRolesMeta, ROLES } = require("./rbac");
 const { haversineMeters, parseHmToMinutes } = require("./geo");
@@ -47,6 +48,26 @@ function localMinutesFromDate(iso) {
   return d.getHours() * 60 + d.getMinutes();
 }
 
+function jwtSecret() {
+  return process.env.JWT_SECRET || process.env.SESSION_SECRET || "dev-insecure-change-me";
+}
+
+function signJwt(user) {
+  return jwt.sign({ sub: user.id, role: user.role }, jwtSecret(), { expiresIn: "7d" });
+}
+
+function mapSimpleRole(role) {
+  if (role === ROLES.USER) return "staff";
+  return "admin";
+}
+
+function mapIncomingRole(simple) {
+  const r = String(simple || "").toLowerCase();
+  if (r === "admin") return ROLES.ATTENDANCE_MANAGER;
+  if (r === "staff") return ROLES.USER;
+  return null;
+}
+
 function createApiRouter(db) {
   const router = express.Router();
 
@@ -65,6 +86,25 @@ function createApiRouter(db) {
   });
 
   function attachUser(req, res, next) {
+    const auth = req.headers.authorization;
+    if (auth && typeof auth === "string" && auth.startsWith("Bearer ")) {
+      try {
+        const payload = jwt.verify(auth.slice(7), jwtSecret());
+        const uid = payload.sub;
+        if (!uid) return res.status(401).json({ error: "Unauthorized" });
+        const user = db
+          .prepare(
+            `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active
+             FROM users WHERE id = ?`
+          )
+          .get(uid);
+        if (!user || !user.active) return res.status(401).json({ error: "Unauthorized" });
+        req.currentUser = user;
+        return next();
+      } catch {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+    }
     if (!req.session.userId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -98,7 +138,31 @@ function createApiRouter(db) {
     appsScriptScheduleAudit(db, info.lastInsertRowid);
   }
 
-  router.post("/auth/login", (req, res) => {
+  function finishLogin(req, res, user) {
+    req.session.userId = user.id;
+    insertAudit(user.id, "login", "session", String(user.id), { path: "login" });
+    const token = signJwt(user);
+    res.json({
+      token,
+      id: user.id,
+      email: user.email,
+      login_id: user.login_id,
+      full_name: user.full_name,
+      role: user.role,
+      branch_id: user.branch_id,
+      user: {
+        id: user.id,
+        name: user.full_name,
+        email: user.email,
+        login_id: user.login_id,
+        role: mapSimpleRole(user.role),
+        rbacRole: user.role,
+        branch_id: user.branch_id,
+      },
+    });
+  }
+
+  function loginFromBody(req, res) {
     const { email, password, login } = req.body || {};
     const idOrEmail = String(email || login || "").trim();
     if (!idOrEmail || !password) {
@@ -113,18 +177,15 @@ function createApiRouter(db) {
     if (!user || !user.active || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
-    req.session.userId = user.id;
-    res.json({
-      id: user.id,
-      email: user.email,
-      login_id: user.login_id,
-      full_name: user.full_name,
-      role: user.role,
-      branch_id: user.branch_id,
-    });
-  });
+    finishLogin(req, res, user);
+  }
+
+  router.post("/auth/login", (req, res) => loginFromBody(req, res));
+  router.post("/login", (req, res) => loginFromBody(req, res));
 
   router.post("/auth/logout", attachUser, (req, res) => {
+    const uid = req.currentUser.id;
+    insertAudit(uid, "logout", "session", String(uid), {});
     req.session.destroy(() => res.json({ ok: true }));
   });
 
@@ -178,9 +239,14 @@ function createApiRouter(db) {
       "leave:approve_manager",
       "export:read",
       "integrations:sync",
+      "audit:read",
     ];
     keys.forEach((k) => {
-      meta[k] = can(user, k);
+      if (k === "audit:read") {
+        meta[k] = user.role === ROLES.SUPER_ADMIN;
+      } else {
+        meta[k] = can(user, k);
+      }
     });
     return meta;
   }
@@ -234,112 +300,117 @@ function createApiRouter(db) {
     });
   }
 
-  router.post(
-    "/attendance/punch",
-    attachUser,
-    upload.single("photo"),
-    async (req, res, next) => {
-      try {
-        const actor = req.currentUser;
-        const type = req.body.type;
-        const lat = req.body.lat !== undefined && req.body.lat !== "" ? Number(req.body.lat) : null;
-        const lng = req.body.lng !== undefined && req.body.lng !== "" ? Number(req.body.lng) : null;
-        const source = req.body.source;
-        const targetUserId = req.body.targetUserId;
-        if (type !== "in" && type !== "out") {
-          return res.status(400).json({ error: "type must be 'in' or 'out'" });
-        }
-        if (!can(actor, "attendance:punch")) {
-          return res.status(403).json({ error: "Forbidden" });
-        }
-
-        let subjectId = actor.id;
-        if (targetUserId && Number(targetUserId) !== actor.id) {
-          if (!can(actor, "attendance:read_all")) {
-            return res.status(403).json({ error: "Cannot punch for other users" });
-          }
-          subjectId = Number(targetUserId);
-        }
-
-        const subject = db
-          .prepare(
-            "SELECT id, branch_id, shift_start, shift_end, grace_minutes, active FROM users WHERE id = ?"
-          )
-          .get(subjectId);
-        if (!subject || !subject.active) {
-          return res.status(404).json({ error: "User not found" });
-        }
-
-        const geo = branchGeoCheck(subject, lat, lng);
-        if (!geo.ok) {
-          return res.status(400).json({ error: geo.reason });
-        }
-
-        const address = await reverseGeocode(lat, lng);
-        const photoPath = req.file ? `/uploads/attendance/${req.file.filename}` : null;
-        const devInfo = devicePayload(req);
-
-        const workDate = todayLocalDate();
-        const rec = getOrCreateDay(subjectId, workDate);
-        const nowIso = new Date().toISOString();
-        const src = source === "kiosk" ? "kiosk" : "device";
-
-        if (type === "in") {
-          if (rec.punch_in_at) {
-            return res.status(400).json({ error: "Already punched in" });
-          }
-          db.prepare(
-            `UPDATE attendance_records
-             SET punch_in_at = ?, in_lat = ?, in_lng = ?, punch_in_address = ?, punch_in_photo = ?, in_device_info = ?,
-                 source = ?, status = ?, last_edited_by = ?
-             WHERE id = ?`
-          ).run(
-            nowIso,
-            lat,
-            lng,
-            address,
-            photoPath,
-            devInfo,
-            src,
-            computeLateStatus(subject, nowIso),
-            actor.id,
-            rec.id
-          );
-        } else {
-          if (!rec.punch_in_at) {
-            return res.status(400).json({ error: "Punch in required first" });
-          }
-          if (rec.punch_out_at) {
-            return res.status(400).json({ error: "Already punched out" });
-          }
-          db.prepare(
-            `UPDATE attendance_records
-             SET punch_out_at = ?, out_lat = ?, out_lng = ?, punch_out_address = ?, punch_out_photo = ?, out_device_info = ?, last_edited_by = ?
-             WHERE id = ?`
-          ).run(
-            nowIso,
-            lat,
-            lng,
-            address,
-            photoPath,
-            devInfo,
-            actor.id,
-            rec.id
-          );
-        }
-
-        const fresh = db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(rec.id);
-        insertAudit(actor.id, type === "in" ? "punch_in" : "punch_out", "attendance", rec.id, {
-          work_date: workDate,
-        });
-        scheduleAttendanceSync(db, rec.id);
-        appsScriptScheduleAttendance(db, rec.id);
-        res.json({ record: fresh, geo, address });
-      } catch (e) {
-        next(e);
+  async function runPunch(req, res, next) {
+    try {
+      const actor = req.currentUser;
+      const type = req.body.type;
+      const lat = req.body.lat !== undefined && req.body.lat !== "" ? Number(req.body.lat) : null;
+      const lng = req.body.lng !== undefined && req.body.lng !== "" ? Number(req.body.lng) : null;
+      const source = req.body.source;
+      const targetUserId = req.body.targetUserId;
+      if (type !== "in" && type !== "out") {
+        return res.status(400).json({ error: "type must be 'in' or 'out'" });
       }
+      if (!can(actor, "attendance:punch")) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      let subjectId = actor.id;
+      if (targetUserId && Number(targetUserId) !== actor.id) {
+        if (!can(actor, "attendance:read_all")) {
+          return res.status(403).json({ error: "Cannot punch for other users" });
+        }
+        subjectId = Number(targetUserId);
+      }
+
+      const subject = db
+        .prepare(
+          "SELECT id, branch_id, shift_start, shift_end, grace_minutes, active FROM users WHERE id = ?"
+        )
+        .get(subjectId);
+      if (!subject || !subject.active) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const geo = branchGeoCheck(subject, lat, lng);
+      if (!geo.ok) {
+        return res.status(400).json({ error: geo.reason });
+      }
+
+      const address = await reverseGeocode(lat, lng);
+      const photoPath = req.file ? `/uploads/attendance/${req.file.filename}` : null;
+      const devInfo = devicePayload(req);
+
+      const workDate = todayLocalDate();
+      const rec = getOrCreateDay(subjectId, workDate);
+      const nowIso = new Date().toISOString();
+      const src = source === "kiosk" ? "kiosk" : "device";
+
+      if (type === "in") {
+        if (rec.punch_in_at) {
+          return res.status(400).json({ error: "Already punched in" });
+        }
+        db.prepare(
+          `UPDATE attendance_records
+           SET punch_in_at = ?, in_lat = ?, in_lng = ?, punch_in_address = ?, punch_in_photo = ?, in_device_info = ?,
+               source = ?, status = ?, last_edited_by = ?
+           WHERE id = ?`
+        ).run(
+          nowIso,
+          lat,
+          lng,
+          address,
+          photoPath,
+          devInfo,
+          src,
+          computeLateStatus(subject, nowIso),
+          actor.id,
+          rec.id
+        );
+      } else {
+        if (!rec.punch_in_at) {
+          return res.status(400).json({ error: "Punch in required first" });
+        }
+        if (rec.punch_out_at) {
+          return res.status(400).json({ error: "Already punched out" });
+        }
+        db.prepare(
+          `UPDATE attendance_records
+           SET punch_out_at = ?, out_lat = ?, out_lng = ?, punch_out_address = ?, punch_out_photo = ?, out_device_info = ?, last_edited_by = ?
+           WHERE id = ?`
+        ).run(nowIso, lat, lng, address, photoPath, devInfo, actor.id, rec.id);
+      }
+
+      const fresh = db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(rec.id);
+      insertAudit(actor.id, type === "in" ? "punch_in" : "punch_out", "attendance", rec.id, {
+        work_date: workDate,
+      });
+      scheduleAttendanceSync(db, rec.id);
+      appsScriptScheduleAttendance(db, rec.id);
+      res.json({
+        record: fresh,
+        checkIn: fresh.punch_in_at,
+        checkOut: fresh.punch_out_at,
+        status: fresh.status,
+        geo,
+        address,
+      });
+    } catch (e) {
+      next(e);
     }
-  );
+  }
+
+  router.post("/attendance/punch", attachUser, upload.single("photo"), runPunch);
+
+  router.post("/attendance/checkin", attachUser, (req, res, next) => {
+    req.body = { ...(req.body || {}), type: "in", source: (req.body && req.body.source) || "device" };
+    runPunch(req, res, next);
+  });
+
+  router.post("/attendance/checkout", attachUser, (req, res, next) => {
+    req.body = { ...(req.body || {}), type: "out", source: (req.body && req.body.source) || "device" };
+    runPunch(req, res, next);
+  });
 
   router.post(
     "/attendance/kiosk-face",
@@ -535,6 +606,70 @@ function createApiRouter(db) {
     }
 
     return res.status(403).json({ error: "Forbidden" });
+  });
+
+  router.get("/attendance", attachUser, (req, res) => {
+    const actor = req.currentUser;
+    const { userId, branchId, from, to, status } = req.query;
+
+    if (!can(actor, "history:read") && !can(actor, "history:read_self")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    let rows;
+    if (can(actor, "history:read")) {
+      let sql = `
+        SELECT ar.*, u.full_name, u.email, u.branch_id
+        FROM attendance_records ar
+        JOIN users u ON u.id = ar.user_id
+        WHERE 1=1
+      `;
+      const params = [];
+      if (userId) {
+        sql += " AND ar.user_id = ?";
+        params.push(Number(userId));
+      }
+      if (branchId) {
+        sql += " AND u.branch_id = ?";
+        params.push(Number(branchId));
+      }
+      if (from) {
+        sql += " AND ar.work_date >= ?";
+        params.push(String(from));
+      }
+      if (to) {
+        sql += " AND ar.work_date <= ?";
+        params.push(String(to));
+      }
+      if (status) {
+        sql += " AND ar.status = ?";
+        params.push(String(status));
+      }
+      sql += " ORDER BY ar.work_date DESC, ar.id DESC LIMIT 500";
+      rows = db.prepare(sql).all(...params);
+    } else {
+      rows = db
+        .prepare(
+          `SELECT ar.*, u.full_name, u.email, u.branch_id
+           FROM attendance_records ar
+           JOIN users u ON u.id = ar.user_id
+           WHERE ar.user_id = ?
+           ORDER BY ar.work_date DESC, ar.id DESC
+           LIMIT 200`
+        )
+        .all(actor.id);
+    }
+
+    const attendance = rows.map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      checkIn: r.punch_in_at,
+      checkOut: r.punch_out_at,
+      status: r.status,
+      workDate: r.work_date,
+      userName: r.full_name,
+    }));
+    res.json({ attendance });
   });
 
   router.get("/attendance/export.csv", attachUser, (req, res) => {
@@ -738,22 +873,22 @@ function createApiRouter(db) {
       const { code, state, error: oauthErr } = req.query;
       if (oauthErr) {
         return res.redirect(
-          `/portal/#settings?google=error&reason=${encodeURIComponent(String(oauthErr))}`
+          `/portal/#/settings?google=error&reason=${encodeURIComponent(String(oauthErr))}`
         );
       }
       if (!code || !state) {
-        return res.redirect("/portal/#settings?google=error&reason=missing_params");
+        return res.redirect("/portal/#/settings?google=error&reason=missing_params");
       }
       if (state !== req.session.googleOAuthState) {
-        return res.redirect("/portal/#settings?google=error&reason=invalid_state");
+        return res.redirect("/portal/#/settings?google=error&reason=invalid_state");
       }
       delete req.session.googleOAuthState;
       await exchangeCodeAndSave(db, String(code));
-      res.redirect("/portal/#settings?google=connected");
+      res.redirect("/portal/#/settings?google=connected");
     } catch (e) {
       console.error("[google oauth callback]", e);
       res.redirect(
-        `/portal/#settings?google=error&reason=${encodeURIComponent(e.message || "oauth_failed")}`
+        `/portal/#/settings?google=error&reason=${encodeURIComponent(e.message || "oauth_failed")}`
       );
     }
   });
@@ -905,7 +1040,7 @@ function createApiRouter(db) {
     }
     const users = db
       .prepare(
-        `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at
+        `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at, mobile, department
          FROM users ORDER BY full_name`
       )
       .all();
@@ -923,6 +1058,8 @@ function createApiRouter(db) {
       shift_start,
       shift_end,
       grace_minutes,
+      mobile,
+      department,
     } = req.body || {};
     if (!email || !password || !full_name || !role) {
       return res.status(400).json({ error: "email, password, full_name, role required" });
@@ -937,8 +1074,8 @@ function createApiRouter(db) {
     try {
       const info = db
         .prepare(
-          `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, shift_start, shift_end, grace_minutes)
-           VALUES (?,?,?,?,?,?,?,?,?)`
+          `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, mobile, department, shift_start, shift_end, grace_minutes)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`
         )
         .run(
           String(email).trim(),
@@ -947,13 +1084,15 @@ function createApiRouter(db) {
           String(full_name).trim(),
           role,
           branch_id ? Number(branch_id) : null,
+          mobile ? String(mobile) : null,
+          department ? String(department) : null,
           shift_start || "09:00",
           shift_end || "18:00",
           Number(grace_minutes) || 15
         );
       const u = db
         .prepare(
-          "SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active FROM users WHERE id = ?"
+          "SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, mobile, department FROM users WHERE id = ?"
         )
         .get(info.lastInsertRowid);
       insertAudit(req.currentUser.id, "user_create", "user", u.id, { email: u.email });
@@ -1104,6 +1243,267 @@ function createApiRouter(db) {
 
   router.patch("/settings", attachUser, requirePerm("settings:write"), (req, res) => {
     res.json({ ok: true, message: "Persist settings in DB or env for production." });
+  });
+
+  router.get("/audit/logs", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 300, 1), 2000);
+    const rows = db
+      .prepare(
+        `SELECT a.*, u.full_name AS actor_name
+         FROM audit_logs a
+         LEFT JOIN users u ON u.id = a.actor_id
+         ORDER BY a.id DESC
+         LIMIT ?`
+      )
+      .all(limit);
+    res.json({ logs: rows });
+  });
+
+  router.get("/attendance/live-status", attachUser, (req, res) => {
+    if (!can(req.currentUser, "attendance:read_all") && !can(req.currentUser, "history:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const today = todayLocalDate();
+    const rows = db
+      .prepare(
+        `SELECT ar.*, u.full_name, u.email, u.login_id
+         FROM attendance_records ar
+         JOIN users u ON u.id = ar.user_id
+         WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NULL
+         ORDER BY u.full_name`
+      )
+      .all(today);
+    res.json({ date: today, currently_in: rows });
+  });
+
+  router.get("/employees", attachUser, (req, res) => {
+    if (!can(req.currentUser, "users:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, full_name, email, role, branch_id, mobile, department FROM users ORDER BY full_name`
+      )
+      .all();
+    res.json({
+      employees: rows.map((r) => ({
+        id: r.id,
+        name: r.full_name,
+        role: mapSimpleRole(r.role),
+        rbacRole: r.role,
+        department: r.department || null,
+        mobile: r.mobile || null,
+        email: r.email,
+        branch_id: r.branch_id,
+      })),
+    });
+  });
+
+  router.post("/employees", attachUser, requirePerm("users:create"), (req, res) => {
+    const { name, mobile, password, role, department, email } = req.body || {};
+    if (!name || !password) {
+      return res.status(400).json({ error: "name and password required" });
+    }
+    const mapped = mapIncomingRole(role);
+    if (!mapped) {
+      return res.status(400).json({ error: "role must be admin or staff" });
+    }
+    const em =
+      email && String(email).trim()
+        ? String(email).trim()
+        : `emp${Date.now()}@prakriti.local`;
+    const hash = bcrypt.hashSync(String(password), 10);
+    try {
+      const info = db
+        .prepare(
+          `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, mobile, department, shift_start, shift_end, grace_minutes)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        )
+        .run(
+          em,
+          null,
+          hash,
+          String(name).trim(),
+          mapped,
+          req.currentUser.branch_id != null ? req.currentUser.branch_id : null,
+          mobile ? String(mobile) : null,
+          department ? String(department) : null,
+          "09:00",
+          "18:00",
+          15
+        );
+      const u = db
+        .prepare(
+          "SELECT id, email, login_id, full_name, role, branch_id, mobile, department FROM users WHERE id = ?"
+        )
+        .get(info.lastInsertRowid);
+      insertAudit(req.currentUser.id, "employee_create", "user", u.id, { email: u.email });
+      scheduleUserSync(db, u.id);
+      appsScriptScheduleUser(db, u.id);
+      res.json({
+        employee: {
+          id: u.id,
+          name: u.full_name,
+          role: mapSimpleRole(u.role),
+          rbacRole: u.role,
+          department: u.department,
+          mobile: u.mobile,
+          email: u.email,
+        },
+      });
+    } catch (e) {
+      if (String(e.message).includes("UNIQUE")) {
+        return res.status(409).json({ error: "Email already exists" });
+      }
+      throw e;
+    }
+  });
+
+  router.get("/logs", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 300, 1), 2000);
+    const rows = db
+      .prepare(
+        `SELECT a.id, a.actor_id, u.full_name AS actor_name, a.action, a.created_at, a.entity_type, a.entity_id, a.details
+         FROM audit_logs a
+         LEFT JOIN users u ON u.id = a.actor_id
+         ORDER BY a.id DESC
+         LIMIT ?`
+      )
+      .all(limit);
+    const logs = rows.map((r) => ({
+      id: r.id,
+      userId: r.actor_id,
+      actorName: r.actor_name,
+      action: r.action,
+      timestamp: r.created_at,
+      entityType: r.entity_type,
+      entityId: r.entity_id,
+      details: r.details
+        ? (() => {
+            try {
+              return JSON.parse(r.details);
+            } catch {
+              return r.details;
+            }
+          })()
+        : null,
+    }));
+    res.json({ logs });
+  });
+
+  router.get("/reports", attachUser, (req, res) => {
+    if (!can(req.currentUser, "export:read") && !can(req.currentUser, "dashboard:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const now = new Date();
+    const y = Number(req.query.year) || now.getFullYear();
+    const m = Number(req.query.month) || now.getMonth() + 1;
+    res.json({
+      generatedAt: new Date().toISOString(),
+      exports: {
+        attendanceCsv: "/api/attendance/export.csv",
+        attendanceXlsx: "/api/attendance/export.xlsx",
+        monthlyCsv: `/api/reports/monthly.csv?year=${y}&month=${m}`,
+        employeesCsv: "/api/employees/export.csv",
+      },
+      note: "Use the same session cookie or Authorization: Bearer token for CSV/XLSX downloads.",
+    });
+  });
+
+  router.get("/employees/export.csv", attachUser, (req, res) => {
+    if (!can(req.currentUser, "users:read") || !can(req.currentUser, "export:read")) {
+      return res.status(403).send("Forbidden");
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at, mobile, department
+         FROM users ORDER BY full_name`
+      )
+      .all();
+    const headers = [
+      "id",
+      "email",
+      "login_id",
+      "full_name",
+      "role",
+      "branch_id",
+      "shift_start",
+      "shift_end",
+      "grace_minutes",
+      "active",
+      "created_at",
+      "mobile",
+      "department",
+    ];
+    const esc = (v) => {
+      if (v == null) return '""';
+      const s = String(v).replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    const lines = [headers.join(",")];
+    for (const r of rows) {
+      lines.push(headers.map((h) => esc(r[h])).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="employees.csv"');
+    res.send(lines.join("\n"));
+  });
+
+  router.get("/reports/monthly.csv", attachUser, (req, res) => {
+    if (!can(req.currentUser, "export:read")) {
+      return res.status(403).send("Forbidden");
+    }
+    const y = Number(req.query.year) || new Date().getFullYear();
+    const m = Number(req.query.month) || new Date().getMonth() + 1;
+    const pad = (n) => String(n).padStart(2, "0");
+    const from = `${y}-${pad(m)}-01`;
+    const lastDay = new Date(y, m, 0).getDate();
+    const to = `${y}-${pad(m)}-${pad(lastDay)}`;
+    let sql = `
+      SELECT ar.*, u.full_name, u.email, u.login_id, b.name AS branch_name
+      FROM attendance_records ar
+      JOIN users u ON u.id = ar.user_id
+      LEFT JOIN branches b ON b.id = u.branch_id
+      WHERE ar.work_date >= ? AND ar.work_date <= ?
+    `;
+    const params = [from, to];
+    if (!can(req.currentUser, "history:read")) {
+      sql += " AND ar.user_id = ?";
+      params.push(req.currentUser.id);
+    }
+    sql += " ORDER BY ar.work_date ASC, u.full_name ASC LIMIT 20000";
+    const recs = db.prepare(sql).all(...params);
+    const headers = [
+      "id",
+      "work_date",
+      "user_id",
+      "full_name",
+      "email",
+      "branch_name",
+      "status",
+      "punch_in_at",
+      "punch_out_at",
+    ];
+    const esc = (v) => {
+      if (v == null) return '""';
+      return `"${String(v).replace(/"/g, '""')}"`;
+    };
+    const lines = [headers.join(",")];
+    for (const r of recs) {
+      lines.push(headers.map((h) => esc(r[h])).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="attendance-report-${y}-${pad(m)}.csv"`
+    );
+    res.send(lines.join("\n"));
   });
 
   registerLeaveRoutes(router, db, {
