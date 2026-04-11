@@ -4,7 +4,7 @@ services:
   - type: web
     name: hrms-portal
     runtime: node
-    plan: starter
+    plan: free
     region: oregon
     buildCommand: npm install
     startCommand: npm start
