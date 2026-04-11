@@ -1,26 +1,30 @@
-# Render Blueprint — optional. Adjust service name and disk if using SQLite persistence.
-# Docs: https://render.com/docs/blueprint-spec
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Persistent disks require a paid instance type (not Free). Adjust `plan` if needed.
 services:
   - type: web
     name: hrms-portal
     runtime: node
-    plan: free
+    plan: starter
     region: oregon
     buildCommand: npm install
     startCommand: npm start
+    disk:
+      name: hrms-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
+      - key: RENDER
+        value: "1"
+      - key: DB_PATH
+        value: /data/hrms.sqlite
       - key: SESSION_SECRET
         generateValue: true
       - key: INTEGRATION_SECRET
         generateValue: true
-      # Set in dashboard (do not commit secrets):
-      # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI,
-      # GOOGLE_APPS_SCRIPT_WEBAPP_URL, GOOGLE_SERVICE_ACCOUNT_JSON, DB_PATH, etc.
-    # Uncomment after adding a persistent disk in the Render dashboard:
-    # disk:
-    #   name: hrms-data
-    #   mountPath: /data
-    #   sizeGB: 1
-    # Then set DB_PATH=/data/hrms.sqlite
+      - key: GOOGLE_APPS_SCRIPT_WEBAPP_URL
+        value: https://script.google.com/macros/s/AKfycbzARaUpHTiKlq37VAzK_4KrvwjE-H7x2tgfOuwFQK2WJUTqa0840LMshKdkx_j3RvmD/exec
+      # Add in Render dashboard after first deploy (use your real service URL):
+      # GOOGLE_OAUTH_REDIRECT_URI = https://hrms-portal.onrender.com/api/integrations/google/oauth/callback
+      # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET

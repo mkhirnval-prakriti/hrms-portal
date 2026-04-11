@@ -13,6 +13,24 @@ const PORT = process.env.PORT || 3000;
 const db = openDb();
 const apiRouter = createApiRouter(db);
 
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "hrms-portal",
+    env: process.env.NODE_ENV || "development",
+    ts: new Date().toISOString(),
+  });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "hrms-portal",
+    env: process.env.NODE_ENV || "development",
+    ts: new Date().toISOString(),
+  });
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 app.use(
