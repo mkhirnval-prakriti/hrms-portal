@@ -1,0 +1,272 @@
+:root {
+  --bg: #0f172a;
+  --panel: #111827;
+  --muted: #94a3b8;
+  --text: #e2e8f0;
+  --accent: #22c55e;
+  --accent-2: #38bdf8;
+  --danger: #f87171;
+  --border: #1f2937;
+  --sidebar: #0b1220;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent-2);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  padding: 1.25rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.75rem;
+  font-size: 0.95rem;
+  color: #fff;
+}
+
+.nav-section {
+  margin-top: 0.75rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.nav a {
+  display: block;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.92rem;
+}
+
+.nav a:hover,
+.nav a.active {
+  background: #111827;
+  color: #fff;
+}
+
+.nav a.disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+main {
+  padding: 1.5rem 1.75rem 2.5rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.grid.cols-3 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+
+.card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.stat {
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  padding: 0.55rem 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--accent);
+  color: #052e16;
+}
+
+.btn.secondary {
+  background: #1f2937;
+  color: var(--text);
+}
+
+.btn.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+input,
+select,
+textarea {
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  color: var(--text);
+  font: inherit;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.45rem 0.35rem;
+  text-align: left;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: #1f2937;
+}
+
+.kiosk {
+  min-height: 100vh;
+  padding: 1.25rem;
+  background: radial-gradient(circle at top, #1e293b, #020617 55%);
+}
+
+.kiosk h1 {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.kiosk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.user-chip {
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: #0b1220;
+}
+
+.user-chip:hover {
+  border-color: var(--accent);
+}
+
+.login-wrap {
+  max-width: 380px;
+  margin: 6vh auto;
+  padding: 2rem 1.75rem;
+  background: var(--panel);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+}
+
+.login-wrap h1 {
+  margin-bottom: 0.35rem;
+}
+
+.login-wrap form {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.error {
+  color: var(--danger);
+  font-size: 0.88rem;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+  }
+  .nav-section {
+    width: 100%;
+  }
+  .btn {
+    min-height: 44px;
+    padding: 0.65rem 1rem;
+  }
+  .nav a {
+    padding: 0.55rem 0.65rem;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+}

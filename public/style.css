@@ -51,3 +51,18 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
+.portal-link {
+  margin-top: 1.75rem;
+  font-size: 0.95rem;
+}
+
+.portal-link a {
+  color: #1a4d2e;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.portal-link a:hover {
+  text-decoration: underline;
+}
