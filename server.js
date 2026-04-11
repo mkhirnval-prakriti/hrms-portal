@@ -12,6 +12,15 @@ app.get("/", (req, res) => {
 
 app.use(express.static('public'));
 
+app.get('/old', (req, res) => {
+  res.redirect(302, '/legacy/');
+});
+
+app.use(
+  '/legacy',
+  express.static(path.join(__dirname, 'legacy'), { index: 'index.html' })
+);
+
 const server = app.listen(PORT, () => {
   console.log("Server Running");
   console.log(
