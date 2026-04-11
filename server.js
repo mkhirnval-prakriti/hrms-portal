@@ -1,28 +1,30 @@
+const path = require("path");
 const express = require("express");
 
 const app = express();
+app.set("trust proxy", 1);
 
-const startPort = Number(process.env.PORT) || 3000;
-const maxAttempts = 50;
+const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.send("HRMS Portal Running");
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-function listen(port) {
-  const server = app.listen(port, () => {
-    console.log("Server Running");
-    console.log(`http://localhost:${port}`);
-  });
+app.use(express.static('public'));
 
-  server.on("error", (err) => {
-    if (err.code === "EADDRINUSE" && port - startPort < maxAttempts) {
-      server.close(() => listen(port + 1));
-    } else {
-      console.error(err);
-      process.exit(1);
-    }
-  });
-}
+const server = app.listen(PORT, () => {
+  console.log("Server Running");
+  console.log(
+    process.env.RENDER
+      ? `Listening on port ${PORT} (Render)`
+      : `http://localhost:${PORT}`
+  );
+});
 
-listen(startPort);
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Stop the other process or set PORT.`);
+    process.exit(1);
+  }
+  throw err;
+});
