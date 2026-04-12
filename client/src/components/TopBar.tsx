@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-
-type Me = {
-  full_name: string
-  role: string
-}
+import { useAuth } from '../context/AuthContext'
 
 type Live = { date?: string; currently_in?: unknown[] }
 
@@ -23,16 +19,10 @@ type TopBarProps = {
 }
 
 export function TopBar({ onMenu }: TopBarProps) {
-  const [me, setMe] = useState<Me | null>(null)
+  const { user: me } = useAuth()
   const [live, setLive] = useState<number | null>(null)
   const [q, setQ] = useState('')
   const base = import.meta.env.BASE_URL
-
-  useEffect(() => {
-    api<{ full_name: string; role: string }>('/auth/me')
-      .then((u) => setMe(u))
-      .catch(() => setMe(null))
-  }, [])
 
   useEffect(() => {
     api<Live>('/attendance/live-status')

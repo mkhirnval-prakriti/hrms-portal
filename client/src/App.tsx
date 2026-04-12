@@ -1,25 +1,18 @@
-import { useEffect, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { LogoLoader } from './components/LogoLoader'
 import { Dashboard } from './pages/Dashboard'
 import { Login } from './pages/Login'
 import { Placeholder } from './pages/Placeholder'
-import { api } from './api'
+import { useAuth } from './context/AuthContext'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<'loading' | 'in' | 'out'>('loading')
+  const { user, initializing } = useAuth()
 
-  useEffect(() => {
-    api('/auth/me')
-      .then(() => setState('in'))
-      .catch(() => setState('out'))
-  }, [])
-
-  if (state === 'loading') {
+  if (initializing) {
     return <LogoLoader />
   }
-  if (state === 'out') {
+  if (!user) {
     return <Navigate to="/login" replace />
   }
   return <>{children}</>

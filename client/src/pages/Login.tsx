@@ -1,30 +1,38 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { api, setToken } from '../api'
+import { useState } from 'react'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { api } from '../api'
+import { LogoLoader } from '../components/LogoLoader'
+import { useAuth } from '../context/AuthContext'
+
+type LoginResponse = {
+  token?: string
+  id: number
+  email: string
+  login_id?: string | null
+  full_name: string
+  role: string
+  branch_id?: number | null
+}
 
 export function Login() {
   const nav = useNavigate()
+  const { user, initializing, completeLogin } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
-  const [checking, setChecking] = useState(true)
-
-  useEffect(() => {
-    api('/auth/me')
-      .then(() => nav('/', { replace: true }))
-      .catch(() => setChecking(false))
-  }, [nav])
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setErr('')
     try {
-      const data = await api<{ token?: string }>('/auth/login', {
+      const data = await api<LoginResponse>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       })
-      if (data.token) setToken(data.token)
-      nav('/', { replace: true })
+      if (data.token) {
+        completeLogin({ ...data, token: data.token })
+        nav('/', { replace: true })
+      }
     } catch (e) {
       setErr((e as Error).message || 'Sign in failed')
     }
@@ -32,12 +40,11 @@ export function Login() {
 
   const base = import.meta.env.BASE_URL
 
-  if (checking) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-[#f8faf9] via-[#f5f7f6] to-[#eef4f0]">
-        <div className="h-12 w-12 animate-pulse rounded-full bg-[#1f5e3b]/10" aria-hidden />
-      </div>
-    )
+  if (initializing) {
+    return <LogoLoader />
+  }
+  if (user) {
+    return <Navigate to="/" replace />
   }
 
   return (
