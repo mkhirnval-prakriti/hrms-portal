@@ -1,0 +1,1 @@
+function e(e,t){return e?.permissions?!!e.permissions[t]:!1}export{e as t};

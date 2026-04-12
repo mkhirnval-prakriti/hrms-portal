@@ -27,8 +27,10 @@ coverage/
 .nyc_output/
 *.tsbuildinfo
 
-# Build outputs (root / tooling)
-dist/
+# Build outputs (root / tooling) — SPA bundle at dist/app/ is tracked for Replit/deploy
+/dist/*
+!/dist/app/
+!/dist/app/**
 build/
 .next/
 out/
