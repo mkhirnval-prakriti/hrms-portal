@@ -6,6 +6,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+!**/.env.example
 .env.local
 .env.*.local
 
@@ -50,3 +51,6 @@ uploads/
 
 # Vercel / deploy
 .vercel
+
+# Legacy Vite output (use dist/app only)
+public/app/

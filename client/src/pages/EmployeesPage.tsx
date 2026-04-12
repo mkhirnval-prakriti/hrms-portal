@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
@@ -48,7 +48,7 @@ export function EmployeesPage() {
   const [editBranch, setEditBranch] = useState<number | ''>('')
   const [editActive, setEditActive] = useState(true)
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setErr(null)
     setLoading(true)
     try {
@@ -63,11 +63,11 @@ export function EmployeesPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [canBranches])
 
   useEffect(() => {
-    refresh()
-  }, [])
+    void refresh()
+  }, [refresh])
 
   async function createEmp(e: React.FormEvent) {
     e.preventDefault()

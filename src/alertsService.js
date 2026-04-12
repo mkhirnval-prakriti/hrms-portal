@@ -20,14 +20,22 @@ function createHrAlert(db, { type, severity, message, userId, actorId, meta }) {
   return info.lastInsertRowid;
 }
 
-function listRecentAlerts(db, { limit = 80, unreadOnly = false } = {}) {
+function listRecentAlerts(db, { limit = 80, unreadOnly = false, branchId = null } = {}) {
   let sql = `SELECT a.*, u.full_name AS user_name, ua.full_name AS actor_name
     FROM hr_alerts a
     LEFT JOIN users u ON u.id = a.user_id
     LEFT JOIN users ua ON ua.id = a.actor_id`;
-  if (unreadOnly) sql += " WHERE a.read_by_admin = 0";
+  const cond = [];
+  const params = [];
+  if (unreadOnly) cond.push("a.read_by_admin = 0");
+  if (branchId != null && branchId !== "") {
+    cond.push("(a.user_id IS NULL OR u.branch_id = ?)");
+    params.push(Number(branchId));
+  }
+  if (cond.length) sql += " WHERE " + cond.join(" AND ");
   sql += " ORDER BY a.id DESC LIMIT ?";
-  return db.prepare(sql).all(Math.min(Math.max(Number(limit) || 80, 1), 500));
+  params.push(Math.min(Math.max(Number(limit) || 80, 1), 500));
+  return db.prepare(sql).all(...params);
 }
 
 function generateOtp() {

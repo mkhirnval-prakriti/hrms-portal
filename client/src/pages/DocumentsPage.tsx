@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
+import { PageSkeleton } from '../components/PageSkeleton'
 
 type DocRow = {
   id: number
@@ -13,66 +15,55 @@ type DocRow = {
   user_name?: string
 }
 
+const docsKey = ['documents', 'list'] as const
+
 export function DocumentsPage() {
   const { user } = useAuth()
-  const [docs, setDocs] = useState<DocRow[]>([])
-  const [err, setErr] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const qc = useQueryClient()
   const [file, setFile] = useState<File | null>(null)
   const [docType, setDocType] = useState('aadhaar')
-  const [busy, setBusy] = useState(false)
 
   const canVerify = canPerm(user, 'documents:verify')
   const canAll = canPerm(user, 'documents:read_all')
 
-  async function load() {
-    setErr(null)
-    setLoading(true)
-    try {
+  const listQ = useQuery({
+    queryKey: docsKey,
+    queryFn: async () => {
       const d = await api<{ documents: DocRow[] }>('/documents')
-      setDocs(d.documents || [])
-    } catch (e) {
-      setErr((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
-  }
+      return d.documents || []
+    },
+    retry: 2,
+    staleTime: 30_000,
+  })
 
-  useEffect(() => {
-    load()
-  }, [])
-
-  async function upload(e: React.FormEvent) {
-    e.preventDefault()
-    if (!file) return
-    setBusy(true)
-    setErr(null)
-    try {
+  const uploadMut = useMutation({
+    mutationFn: async (payload: { file: File; doc_type: string }) => {
       const fd = new FormData()
-      fd.append('file', file)
-      fd.append('doc_type', docType)
+      fd.append('file', payload.file)
+      fd.append('doc_type', payload.doc_type)
       await api('/documents', { method: 'POST', body: fd })
-      setFile(null)
-      await load()
-    } catch (e) {
-      setErr((e as Error).message)
-    } finally {
-      setBusy(false)
-    }
-  }
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: docsKey }),
+  })
 
-  async function verify(id: number, verified: boolean) {
-    setErr(null)
-    try {
+  const verifyMut = useMutation({
+    mutationFn: async ({ id, verified }: { id: number; verified: boolean }) => {
       await api(`/documents/${id}/verify`, {
         method: 'PATCH',
         body: JSON.stringify({ verified, verifier_notes: verified ? 'Verified in HRMS' : 'Unverified' }),
       })
-      await load()
-    } catch (e) {
-      setErr((e as Error).message)
-    }
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: docsKey }),
+  })
+
+  async function upload(e: React.FormEvent) {
+    e.preventDefault()
+    if (!file) return
+    uploadMut.mutate({ file, doc_type: docType })
+    setFile(null)
   }
+
+  const docs = listQ.data ?? []
 
   return (
     <div className="mx-auto max-w-[1000px] space-y-6 pb-8">
@@ -109,26 +100,44 @@ export function DocumentsPage() {
             />
           </label>
         </div>
+        {uploadMut.error && (
+          <p className="text-sm text-red-600">{(uploadMut.error as Error).message}</p>
+        )}
         <button
           type="submit"
-          disabled={busy || !file}
+          disabled={uploadMut.isPending || !file}
           className="rounded-xl bg-[#1f5e3b] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
         >
-          Upload
+          {uploadMut.isPending ? 'Uploading…' : 'Upload'}
         </button>
       </form>
 
       <div className="ph-card rounded-2xl p-6">
         <div className="flex justify-between">
           <h2 className="text-lg font-semibold text-[#1f5e3b]">Documents</h2>
-          <button type="button" onClick={load} className="text-sm text-[#1f5e3b] underline">
+          <button
+            type="button"
+            onClick={() => listQ.refetch()}
+            className="text-sm text-[#1f5e3b] underline"
+          >
             Refresh
           </button>
         </div>
-        {err && <p className="mt-3 text-sm text-red-600">{err}</p>}
-        {loading ? (
-          <p className="mt-4 text-sm">Loading…</p>
-        ) : (
+        {listQ.error && (
+          <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-4 text-sm text-red-800">
+            <p className="font-medium">Failed to load documents</p>
+            <p className="mt-1">{(listQ.error as Error).message}</p>
+            <button
+              type="button"
+              onClick={() => listQ.refetch()}
+              className="mt-3 rounded-lg bg-[#1f5e3b] px-4 py-2 text-xs font-semibold text-white"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {listQ.isLoading && <PageSkeleton rows={5} />}
+        {!listQ.isLoading && !listQ.error && (
           <div className="mt-4 space-y-3">
             {docs.map((d) => (
               <div
@@ -159,8 +168,9 @@ export function DocumentsPage() {
                     {Number(d.verified) !== 1 && (
                       <button
                         type="button"
-                        onClick={() => verify(d.id, true)}
-                        className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white"
+                        onClick={() => verifyMut.mutate({ id: d.id, verified: true })}
+                        disabled={verifyMut.isPending}
+                        className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                       >
                         Mark verified
                       </button>
@@ -168,8 +178,9 @@ export function DocumentsPage() {
                     {Number(d.verified) === 1 && (
                       <button
                         type="button"
-                        onClick={() => verify(d.id, false)}
-                        className="rounded-lg border border-[#8d6e63]/40 px-3 py-1.5 text-xs text-[#5d4037]"
+                        onClick={() => verifyMut.mutate({ id: d.id, verified: false })}
+                        disabled={verifyMut.isPending}
+                        className="rounded-lg border border-[#8d6e63]/40 px-3 py-1.5 text-xs text-[#5d4037] disabled:opacity-50"
                       >
                         Revoke
                       </button>
@@ -180,6 +191,9 @@ export function DocumentsPage() {
             ))}
             {docs.length === 0 && <p className="text-sm text-[#1f5e3b]/60">No documents yet.</p>}
           </div>
+        )}
+        {verifyMut.error && (
+          <p className="mt-3 text-sm text-red-600">{(verifyMut.error as Error).message}</p>
         )}
       </div>
     </div>

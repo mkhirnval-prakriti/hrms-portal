@@ -1,20 +1,24 @@
+import { Suspense, lazy } from 'react'
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { LogoLoader } from './components/LogoLoader'
-import { Dashboard } from './pages/Dashboard'
 import { Login } from './pages/Login'
-import { AttendancePage } from './pages/AttendancePage'
-import { EmployeesPage } from './pages/EmployeesPage'
-import { LeavesPage } from './pages/LeavesPage'
-import { PayrollPage } from './pages/PayrollPage'
-import { DocumentsPage } from './pages/DocumentsPage'
-import { NoticesPage } from './pages/NoticesPage'
-import { OfficePage } from './pages/OfficePage'
-import { CompanyPage } from './pages/CompanyPage'
-import { GuidePage } from './pages/GuidePage'
-import { KioskPage } from './pages/KioskPage'
-import { TrashPage } from './pages/TrashPage'
+import { ForgotPassword } from './pages/ForgotPassword'
+import { PageSkeleton } from './components/PageSkeleton'
 import { useAuth } from './context/AuthContext'
+
+const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })))
+const AttendancePage = lazy(() => import('./pages/AttendancePage').then((m) => ({ default: m.AttendancePage })))
+const EmployeesPage = lazy(() => import('./pages/EmployeesPage').then((m) => ({ default: m.EmployeesPage })))
+const LeavesPage = lazy(() => import('./pages/LeavesPage').then((m) => ({ default: m.LeavesPage })))
+const PayrollPage = lazy(() => import('./pages/PayrollPage').then((m) => ({ default: m.PayrollPage })))
+const DocumentsPage = lazy(() => import('./pages/DocumentsPage').then((m) => ({ default: m.DocumentsPage })))
+const NoticesPage = lazy(() => import('./pages/NoticesPage').then((m) => ({ default: m.NoticesPage })))
+const OfficePage = lazy(() => import('./pages/OfficePage').then((m) => ({ default: m.OfficePage })))
+const CompanyPage = lazy(() => import('./pages/CompanyPage').then((m) => ({ default: m.CompanyPage })))
+const GuidePage = lazy(() => import('./pages/GuidePage').then((m) => ({ default: m.GuidePage })))
+const KioskPage = lazy(() => import('./pages/KioskPage').then((m) => ({ default: m.KioskPage })))
+const TrashPage = lazy(() => import('./pages/TrashPage').then((m) => ({ default: m.TrashPage })))
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, initializing } = useAuth()
@@ -33,6 +37,7 @@ export default function App() {
     <HashRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/login/forgot" element={<ForgotPassword />} />
         <Route
           path="/"
           element={
@@ -41,19 +46,103 @@ export default function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<Dashboard />} />
-          <Route path="attendance" element={<AttendancePage />} />
-          <Route path="employees" element={<EmployeesPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
-          <Route path="leaves" element={<LeavesPage />} />
-          <Route path="payroll" element={<PayrollPage />} />
+          <Route
+            index
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <Dashboard />
+              </Suspense>
+            }
+          />
+          <Route
+            path="attendance"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <AttendancePage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="employees"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <EmployeesPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="documents"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <DocumentsPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="leaves"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <LeavesPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="payroll"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <PayrollPage />
+              </Suspense>
+            }
+          />
           <Route path="staff-mgmt" element={<Navigate to="/employees" replace />} />
-          <Route path="kiosk" element={<KioskPage />} />
-          <Route path="trash" element={<TrashPage />} />
-          <Route path="office" element={<OfficePage />} />
-          <Route path="company" element={<CompanyPage />} />
-          <Route path="notices" element={<NoticesPage />} />
-          <Route path="guide" element={<GuidePage />} />
+          <Route
+            path="kiosk"
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <KioskPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="trash"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <TrashPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="office"
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <OfficePage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="company"
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <CompanyPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="notices"
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <NoticesPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="guide"
+            element={
+              <Suspense fallback={<PageSkeleton />}>
+                <GuidePage />
+              </Suspense>
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

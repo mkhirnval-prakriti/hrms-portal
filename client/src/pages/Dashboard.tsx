@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 
 type AlertRow = {
@@ -79,23 +80,21 @@ const inr = (n: number) =>
 const POLL_MS = 25000
 
 export function Dashboard() {
-  const [data, setData] = useState<Overview | null>(null)
-  const [err, setErr] = useState<string | null>(null)
+  const {
+    data,
+    error: queryError,
+    isPending,
+    refetch,
+    isFetching,
+  } = useQuery({
+    queryKey: ['dashboard', 'overview'],
+    queryFn: () => api<Overview>('/dashboard/overview'),
+    refetchInterval: POLL_MS,
+  })
+  const err = queryError ? (queryError as Error).message : null
   const [drill, setDrill] = useState<{ title: string; status: string } | null>(null)
   const [drillRows, setDrillRows] = useState<DrillPerson[]>([])
   const [drillLoading, setDrillLoading] = useState(false)
-
-  const load = useCallback(() => {
-    api<Overview>('/dashboard/overview')
-      .then(setData)
-      .catch((e: Error) => setErr(e.message))
-  }, [])
-
-  useEffect(() => {
-    load()
-    const t = window.setInterval(load, POLL_MS)
-    return () => window.clearInterval(t)
-  }, [load])
 
   async function openDrill(title: string, status: string) {
     setDrill({ title, status })
@@ -116,17 +115,25 @@ export function Dashboard() {
   if (err) {
     return (
       <div className="ph-card rounded-2xl p-6 text-red-700">
-        Dashboard: {err}
+        <p>Dashboard: {err}</p>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="mt-4 rounded-xl bg-[#1f5e3b] px-4 py-2 text-sm font-semibold text-white"
+        >
+          Retry
+        </button>
       </div>
     )
   }
-  if (!data) {
+  if (isPending || !data) {
     return (
-      <div className="flex h-[50vh] items-center justify-center">
+      <div className="flex h-[50vh] flex-col items-center justify-center gap-3">
         <div className="relative h-14 w-14">
           <div className="ph-loader-orbit absolute inset-0 rounded-full border-2 border-dashed border-[#1f5e3b]/20 border-t-[#66bb6a]" />
           <div className="absolute inset-0 m-auto h-8 w-8 rounded-full bg-[#1f5e3b]/5" />
         </div>
+        {isFetching && <p className="text-xs text-[#1f5e3b]/60">Updating…</p>}
       </div>
     )
   }

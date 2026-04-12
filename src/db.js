@@ -119,6 +119,20 @@ function migrate(db) {
     }
   }
 
+  const attMethodCols = [
+    ["punch_method_in", "TEXT"],
+    ["punch_method_out", "TEXT"],
+    ["device_in", "TEXT"],
+    ["device_out", "TEXT"],
+    ["verification_in", "TEXT"],
+    ["verification_out", "TEXT"],
+  ];
+  for (const [c, t] of attMethodCols) {
+    if (!hasColumn(db, "attendance_records", c)) {
+      tryAddColumn(db, "attendance_records", `${c} ${t}`);
+    }
+  }
+
   tryAddColumn(db, "notices", "visible_from TEXT");
   tryAddColumn(db, "notices", "visible_until TEXT");
   tryAddColumn(db, "notices", "repeat_rule TEXT");
@@ -269,6 +283,17 @@ function migrate(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS password_reset_otps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      otp_code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pwreset_otp_user ON password_reset_otps(user_id);
   `);
 
   db.exec(`
@@ -288,6 +313,41 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+  `);
+
+  tryAddColumn(db, "users", "base_salary_inr REAL NOT NULL DEFAULT 12000");
+  tryAddColumn(db, "users", "joining_date TEXT");
+  tryAddColumn(db, "users", "payroll_job_role TEXT NOT NULL DEFAULT 'delivery'");
+
+  const payrollEntryCols = [
+    ["delivery_amount", "REAL NOT NULL DEFAULT 0"],
+    ["total_leaves", "REAL NOT NULL DEFAULT 0"],
+    ["leave_type", "TEXT NOT NULL DEFAULT 'paid'"],
+    ["late_minutes", "INTEGER NOT NULL DEFAULT 0"],
+    ["incentive_inr", "REAL NOT NULL DEFAULT 0"],
+    ["leave_deduction_inr", "REAL NOT NULL DEFAULT 0"],
+    ["late_deduction_inr", "REAL NOT NULL DEFAULT 0"],
+    ["no_leave_bonus_inr", "REAL NOT NULL DEFAULT 0"],
+    ["base_salary_snapshot", "REAL"],
+  ];
+  for (const [c, t] of payrollEntryCols) {
+    if (!hasColumn(db, "payroll_entries", c)) {
+      tryAddColumn(db, "payroll_entries", `${c} ${t}`);
+    }
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payroll_delivery_daily (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      work_date TEXT NOT NULL,
+      amount_inr REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, work_date),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_payroll_delivery_user_date ON payroll_delivery_daily(user_id, work_date);
   `);
 
   const namedBranches = ["Amritsar", "Jaipur", "Derabassi"];

@@ -47,15 +47,15 @@ export function TopBar({ onMenu }: TopBarProps) {
   }, [])
 
   useEffect(() => {
-    if (q.trim().length < 1) {
-      setSearchData(null)
-      return
-    }
     const h = window.setTimeout(() => {
+      if (q.trim().length < 1) {
+        setSearchData(null)
+        return
+      }
       api<SearchRes>('/search?q=' + encodeURIComponent(q.trim()))
         .then(setSearchData)
         .catch(() => setSearchData({ employees: [], branches: [] }))
-    }, 320)
+    }, q.trim().length < 1 ? 0 : 320)
     return () => window.clearTimeout(h)
   }, [q])
 

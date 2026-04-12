@@ -1,21 +1,20 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
+import { PageSkeleton } from '../components/PageSkeleton'
 
 export function CompanyPage() {
   const { user } = useAuth()
-  const [data, setData] = useState<Record<string, unknown> | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
   const can = canPerm(user, 'settings:read')
 
-  useEffect(() => {
-    if (!can) return
-    api('/settings')
-      .then((d) => setData(d as Record<string, unknown>))
-      .catch((e) => setErr((e as Error).message))
-  }, [can])
+  const q = useQuery({
+    queryKey: ['settings', 'company'],
+    queryFn: () => api<Record<string, unknown>>('/settings'),
+    enabled: can,
+    retry: 2,
+    staleTime: 60_000,
+  })
 
   if (!can) {
     return (
@@ -28,10 +27,23 @@ export function CompanyPage() {
   return (
     <div className="mx-auto max-w-[720px] space-y-6 pb-8">
       <h1 className="text-2xl font-bold text-[#1f5e3b]">Company</h1>
-      {err && <p className="text-sm text-red-600">{err}</p>}
-      {data && (
+      {q.error && (
+        <div className="rounded-xl border border-red-200 bg-red-50/80 p-4 text-sm text-red-800">
+          <p className="font-medium">Failed to load config</p>
+          <p className="mt-1">{(q.error as Error).message}</p>
+          <button
+            type="button"
+            onClick={() => q.refetch()}
+            className="mt-3 rounded-lg bg-[#1f5e3b] px-4 py-2 text-xs font-semibold text-white"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {q.isLoading && <PageSkeleton rows={4} />}
+      {q.data && !q.isLoading && (
         <div className="ph-card rounded-2xl p-6 text-sm">
-          <pre className="overflow-x-auto whitespace-pre-wrap text-[#14261a]">{JSON.stringify(data, null, 2)}</pre>
+          <pre className="overflow-x-auto whitespace-pre-wrap text-[#14261a]">{JSON.stringify(q.data, null, 2)}</pre>
         </div>
       )}
     </div>

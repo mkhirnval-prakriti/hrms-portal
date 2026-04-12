@@ -1,5 +1,18 @@
 const JWT_KEY = 'ph_jwt'
 
+/** Base URL for API (no trailing slash). Empty = same origin as the SPA. */
+export function apiBaseUrl(): string {
+  const raw = import.meta.env.VITE_API_BASE_URL
+  if (typeof raw === 'string' && raw.trim()) return raw.replace(/\/$/, '')
+  return ''
+}
+
+/** Full URL for `/api/...` requests (works with dev proxy and production same-origin). */
+export function apiFetchUrl(apiPath: string): string {
+  const p = apiPath.startsWith('/') ? apiPath : `/${apiPath}`
+  return `${apiBaseUrl()}/api${p}`
+}
+
 export function getToken(): string | null {
   try {
     return localStorage.getItem(JWT_KEY)
@@ -32,7 +45,7 @@ export async function api<T = unknown>(
   if (token && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${token}`
   }
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(apiFetchUrl(path), {
     credentials: 'include',
     headers,
     ...options,

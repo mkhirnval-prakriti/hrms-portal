@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { LogoLoader } from '../components/LogoLoader'
 import { useAuth } from '../context/AuthContext'
@@ -19,30 +19,28 @@ export function Login() {
   const nav = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { user, initializing, completeLogin } = useAuth()
-  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [otp, setOtp] = useState('')
-  const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const resetToken = searchParams.get('reset') || ''
   const [newPass, setNewPass] = useState('')
   const [newPass2, setNewPass2] = useState('')
+  const [msg, setMsg] = useState('')
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setErr('')
-    setMsg('')
     try {
       const data = await api<LoginResponse>('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password, otp: otp.trim() || undefined }),
+        body: JSON.stringify({ login: username.trim(), password }),
       })
       if (data.token) {
         completeLogin({ ...data, token: data.token })
         nav('/', { replace: true })
       }
     } catch (e) {
-      setErr((e as Error).message || 'Sign in failed')
+      setErr((e as Error).message || 'Invalid credentials')
     }
   }
 
@@ -150,27 +148,27 @@ export function Login() {
           <div className="mb-6 flex flex-col items-center gap-2">
             <img
               src={`${base}logo.png`}
-              alt="Prakriti Herbs Ayurveda"
+              alt="Prakriti Herbs Private Limited"
               className="h-[100px] w-auto max-w-[220px] object-contain"
               width={220}
               height={100}
             />
             <p className="font-display text-center text-lg font-semibold tracking-tight text-[#1f5e3b]">
-              Prakriti HRMS
+              Prakriti Herbs Private Limited · HRMS
             </p>
           </div>
           <form onSubmit={onSubmit} className="space-y-5">
             <div>
-              <label htmlFor="ph-email" className="mb-1.5 block text-xs font-semibold tracking-wide text-[#1f5e3b]/90">
-                Email or User ID
+              <label htmlFor="ph-user" className="mb-1.5 block text-xs font-semibold tracking-wide text-[#1f5e3b]/90">
+                Username / User ID
               </label>
               <input
-                id="ph-email"
+                id="ph-user"
                 className="w-full rounded-xl border border-[#1f5e3b]/12 bg-white/90 px-4 py-3 text-sm text-[#14261a] shadow-inner shadow-black/5 outline-none ring-[#1f5e3b]/0 transition focus:border-[#66bb6a]/50 focus:ring-4 focus:ring-[#1f5e3b]/10"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 autoComplete="username"
-                placeholder=""
+                required
               />
             </div>
             <div>
@@ -184,66 +182,9 @@ export function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="current-password"
-                placeholder=""
+                required
               />
             </div>
-            <div>
-              <label htmlFor="ph-otp" className="mb-1.5 block text-xs font-semibold tracking-wide text-[#1f5e3b]/90">
-                Email OTP (if required by server)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  id="ph-otp"
-                  inputMode="numeric"
-                  className="min-w-0 flex-1 rounded-xl border border-[#1f5e3b]/12 bg-white/90 px-4 py-3 text-sm text-[#14261a] shadow-inner"
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  placeholder="6-digit code"
-                  autoComplete="one-time-code"
-                />
-                <button
-                  type="button"
-                  className="shrink-0 rounded-xl border border-[#1f5e3b]/20 bg-[#e8f5e9] px-3 text-xs font-semibold text-[#1f5e3b]"
-                  onClick={async () => {
-                    setErr('')
-                    setMsg('')
-                    try {
-                      await api('/auth/otp/request', {
-                        method: 'POST',
-                        body: JSON.stringify({ email }),
-                      })
-                      setMsg('OTP sent to your email (if SMTP is configured).')
-                    } catch (e) {
-                      setErr((e as Error).message)
-                    }
-                  }}
-                >
-                  Send OTP
-                </button>
-              </div>
-            </div>
-            {msg && <p className="text-xs text-[#2e7d32]">{msg}</p>}
-            <p className="text-center text-xs text-[#1f5e3b]/65">
-              <button
-                type="button"
-                className="font-medium text-[#2e7d32] underline"
-                onClick={async () => {
-                  setErr('')
-                  setMsg('')
-                  try {
-                    await api('/auth/forgot-password', {
-                      method: 'POST',
-                      body: JSON.stringify({ email }),
-                    })
-                    setMsg('If an account exists, a reset link was sent to your email.')
-                  } catch (e) {
-                    setErr((e as Error).message)
-                  }
-                }}
-              >
-                Forgot password?
-              </button>
-            </p>
             {err && (
               <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
                 {err}
@@ -255,6 +196,11 @@ export function Login() {
             >
               Sign in
             </button>
+            <p className="text-center text-xs text-[#1f5e3b]/65">
+              <Link to="/login/forgot" className="font-medium text-[#2e7d32] underline">
+                Forgot password?
+              </Link>
+            </p>
           </form>
         </div>
       </div>

@@ -7,8 +7,9 @@ const ROLES = {
 };
 
 const ROLE_MATRIX = {
-  [ROLES.SUPER_ADMIN]: ["*"],
+  [ROLES.SUPER_ADMIN]: ["*", "audit:read"],
   [ROLES.ADMIN]: [
+    "audit:read",
     "dashboard:read",
     "branches:read",
     "branches:write",
@@ -141,7 +142,7 @@ function listRolesMeta() {
     },
     {
       id: ROLES.USER,
-      label: "User",
+      label: "Staff",
       description: "Self-service attendance and personal history.",
     },
   ];

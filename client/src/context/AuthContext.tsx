@@ -132,6 +132,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
+/** Co-located hook + provider (standard React context pattern). */
+// eslint-disable-next-line react-refresh/only-export-components -- useAuth must live next to AuthProvider
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used within AuthProvider')

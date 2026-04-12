@@ -6,7 +6,17 @@ const multer = require("multer");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const ExcelJS = require("exceljs");
+const PDFDocument = require("pdfkit");
+const { defaultPayrollSettings, computePayrollRow } = require("./payrollEngine");
 const { can, requirePerm, listRolesMeta, ROLES } = require("./rbac");
+const {
+  isOrgWide,
+  isBranchScoped,
+  assertUserAccess,
+  assertUserIdAccess,
+  branchScopeSql,
+  assertRoleAssignableOnCreate,
+} = require("./accessScope");
 const { haversineMeters, parseHmToMinutes } = require("./geo");
 const { reverseGeocode } = require("./geocode");
 const {
@@ -55,7 +65,12 @@ function localMinutesFromDate(iso) {
 }
 
 function jwtSecret() {
-  return process.env.JWT_SECRET || process.env.SESSION_SECRET || "dev-insecure-change-me";
+  const s = process.env.JWT_SECRET || process.env.SESSION_SECRET;
+  if (s) return s;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET or SESSION_SECRET must be set in production");
+  }
+  return "dev-insecure-change-me";
 }
 
 function signJwt(user) {
@@ -257,6 +272,35 @@ function createApiRouter(db) {
     );
   }
 
+  const PAYROLL_SETTINGS_KEY = "payroll_settings_v1";
+  function readPayrollSettings() {
+    const r = db.prepare("SELECT v FROM integration_kv WHERE k = ?").get(PAYROLL_SETTINGS_KEY);
+    if (!r || !r.v) return defaultPayrollSettings();
+    try {
+      return { ...defaultPayrollSettings(), ...JSON.parse(r.v) };
+    } catch {
+      return defaultPayrollSettings();
+    }
+  }
+  function writePayrollSettings(obj) {
+    const next = { ...readPayrollSettings(), ...obj };
+    db.prepare("INSERT OR REPLACE INTO integration_kv (k, v) VALUES (?, ?)").run(
+      PAYROLL_SETTINGS_KEY,
+      JSON.stringify(next)
+    );
+    return next;
+  }
+
+  function sumDeliveryDailyForMonth(userId, period) {
+    const row = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_inr), 0) AS s FROM payroll_delivery_daily
+         WHERE user_id = ? AND substr(work_date, 1, 7) = ?`
+      )
+      .get(Number(userId), String(period).slice(0, 7));
+    return Number(row && row.s) || 0;
+  }
+
   function listEffectivePermissions(user) {
     const meta = {};
     const keys = [
@@ -299,11 +343,7 @@ function createApiRouter(db) {
       "audit:read",
     ];
     keys.forEach((k) => {
-      if (k === "audit:read") {
-        meta[k] = user.role === ROLES.SUPER_ADMIN;
-      } else {
-        meta[k] = can(user, k);
-      }
+      meta[k] = can(user, k);
     });
     return meta;
   }
@@ -334,7 +374,7 @@ function createApiRouter(db) {
   }
 
   function loginFromBody(req, res) {
-    const { email, password, login, otp } = req.body || {};
+    const { email, password, login } = req.body || {};
     const idOrEmail = String(email || login || "").trim();
     if (!idOrEmail || !password) {
       return res.status(400).json({ error: "Email or user ID and password required" });
@@ -347,18 +387,6 @@ function createApiRouter(db) {
       .get(idOrEmail, idOrEmail);
     if (!user || !user.active || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ error: "Invalid credentials" });
-    }
-    if (process.env.REQUIRE_LOGIN_OTP === "1") {
-      const code = String(otp || "").trim();
-      const row = db
-        .prepare(
-          `SELECT * FROM login_otps WHERE lower(email) = lower(?) AND used = 0 ORDER BY id DESC LIMIT 1`
-        )
-        .get(user.email);
-      if (!row || row.code !== code || new Date(row.expires_at) < new Date()) {
-        return res.status(401).json({ error: "Valid OTP required (request via POST /api/auth/otp/request)" });
-      }
-      db.prepare(`UPDATE login_otps SET used = 1 WHERE id = ?`).run(row.id);
     }
     finishLogin(req, res, user);
   }
@@ -404,32 +432,75 @@ function createApiRouter(db) {
 
   router.post("/auth/forgot-password", async (req, res, next) => {
     try {
-      const email = String(req.body?.email || "").trim();
-      if (!email) return res.status(400).json({ error: "email required" });
+      const idOrMobile = String(req.body?.email || req.body?.mobile || "").trim();
+      if (!idOrMobile) return res.status(400).json({ error: "email or mobile required" });
       const user = db
-        .prepare(`SELECT id FROM users WHERE lower(email) = lower(?) AND deleted_at IS NULL AND active = 1`)
-        .get(email);
+        .prepare(
+          `SELECT id, email FROM users WHERE deleted_at IS NULL AND active = 1 AND (
+            lower(email) = lower(?) OR replace(ifnull(mobile,''),' ','') = replace(?,' ','')
+          )`
+        )
+        .get(idOrMobile, idOrMobile);
       if (!user) {
-        return res.json({ ok: true, message: "If an account exists, a reset link will be sent." });
+        return res.json({ ok: true, message: "If an account exists, an OTP will be sent." });
       }
-      const token = crypto.randomBytes(32).toString("hex");
-      const exp = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      db.prepare(`INSERT OR REPLACE INTO password_reset_tokens (token, user_id, expires_at) VALUES (?,?,?)`).run(
-        token,
+      const code = generateOtp();
+      const exp = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      db.prepare(`DELETE FROM password_reset_otps WHERE user_id = ?`).run(user.id);
+      db.prepare(`INSERT INTO password_reset_otps (user_id, otp_code, expires_at, attempts) VALUES (?,?,?,0)`).run(
         user.id,
+        code,
         exp
       );
-      const base = process.env.PUBLIC_APP_URL || "http://localhost:3000";
-      const link = `${base}/app/#/login?reset=${encodeURIComponent(token)}`;
       await sendMail({
-        to: email,
-        subject: "HRMS — password reset",
-        text: `Reset your password using this link (valid 1 hour):\n${link}\nIf you did not request this, ignore this email.`,
+        to: user.email,
+        subject: "Prakriti Herbs HRMS — password reset OTP",
+        text: `Your OTP code: ${code}\nValid for 5 minutes. Do not share this code.\nIf you did not request a reset, ignore this email.`,
       });
-      res.json({ ok: true, message: "If an account exists, a reset link will be sent." });
+      res.json({ ok: true, message: "If an account exists, an OTP was sent to the registered email." });
     } catch (e) {
       next(e);
     }
+  });
+
+  router.post("/auth/verify-otp", (req, res) => {
+    const emailOrMobile = String(req.body?.email || req.body?.mobile || "").trim();
+    const otp = String(req.body?.otp || "").trim();
+    if (!emailOrMobile || !otp) {
+      return res.status(400).json({ error: "email (or mobile) and otp required" });
+    }
+    const user = db
+      .prepare(
+        `SELECT id, email FROM users WHERE deleted_at IS NULL AND active = 1 AND (
+          lower(email) = lower(?) OR replace(ifnull(mobile,''),' ','') = replace(?,' ','')
+        )`
+      )
+      .get(emailOrMobile, emailOrMobile);
+    if (!user) {
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+    const row = db
+      .prepare(`SELECT * FROM password_reset_otps WHERE user_id = ? ORDER BY id DESC LIMIT 1`)
+      .get(user.id);
+    if (!row || new Date(row.expires_at) < new Date()) {
+      return res.status(400).json({ error: "OTP expired" });
+    }
+    if (Number(row.attempts) >= 3) {
+      return res.status(400).json({ error: "Too many attempts. Request a new OTP." });
+    }
+    if (String(row.otp_code) !== otp) {
+      db.prepare(`UPDATE password_reset_otps SET attempts = attempts + 1 WHERE id = ?`).run(row.id);
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const exp = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare(`DELETE FROM password_reset_otps WHERE user_id = ?`).run(user.id);
+    db.prepare(`INSERT OR REPLACE INTO password_reset_tokens (token, user_id, expires_at) VALUES (?,?,?)`).run(
+      resetToken,
+      user.id,
+      exp
+    );
+    res.json({ ok: true, reset_token: resetToken, expires_in_minutes: 15 });
   });
 
   router.post("/auth/reset-password", (req, res) => {
@@ -550,7 +621,7 @@ function createApiRouter(db) {
 
       const subject = db
         .prepare(
-          `SELECT id, branch_id, shift_start, shift_end, grace_minutes, active,
+          `SELECT id, branch_id, role, shift_start, shift_end, grace_minutes, active,
            COALESCE(allow_gps,1) AS allow_gps, COALESCE(allow_face,0) AS allow_face, COALESCE(allow_manual,1) AS allow_manual,
            COALESCE(allow_biometric,0) AS allow_biometric
            FROM users WHERE id = ? AND deleted_at IS NULL`
@@ -558,6 +629,10 @@ function createApiRouter(db) {
         .get(subjectId);
       if (!subject || !subject.active) {
         return res.status(404).json({ error: "User not found" });
+      }
+      const scopePunch = assertUserAccess(actor, subject);
+      if (!scopePunch.ok) {
+        return res.status(scopePunch.status).json({ error: scopePunch.error });
       }
 
       if (req.body.useBranchCenter === true && subject.branch_id) {
@@ -568,7 +643,39 @@ function createApiRouter(db) {
         }
       }
 
+      const explicitMethod = String(req.body.attendanceMethod || req.body.method || "").toLowerCase();
       const useOfficeCenter = req.body.useBranchCenter === true && subject.branch_id;
+      let punchMethod = explicitMethod;
+      if (!punchMethod) {
+        if (req.file) punchMethod = "face";
+        else punchMethod = "gps";
+      }
+      const allowedMethods = ["gps", "office", "face", "fingerprint"];
+      if (!allowedMethods.includes(punchMethod)) punchMethod = req.file ? "face" : "gps";
+      if (explicitMethod === "fingerprint") {
+        punchMethod = "fingerprint";
+      } else if (useOfficeCenter && punchMethod !== "face") {
+        punchMethod = "office";
+      }
+
+      if (punchMethod === "fingerprint" && (lat == null || lng == null) && subject.branch_id) {
+        const br = db.prepare("SELECT lat, lng FROM branches WHERE id = ?").get(subject.branch_id);
+        if (br && br.lat != null && br.lng != null) {
+          lat = Number(br.lat);
+          lng = Number(br.lng);
+        }
+      }
+
+      if (punchMethod === "face" && Number(subject.allow_face) === 0) {
+        return res.status(403).json({ error: "Face attendance is disabled for this account." });
+      }
+      if (punchMethod === "face" && !req.file) {
+        return res.status(400).json({ error: "Photo required for face attendance" });
+      }
+      if (punchMethod === "fingerprint" && Number(subject.allow_biometric) === 0) {
+        return res.status(403).json({ error: "Fingerprint attendance is disabled for this account." });
+      }
+
       if (!useOfficeCenter && lat != null && lng != null && subject.allow_gps === 0) {
         raiseHrAlert({
           type: "unauthorized_mode",
@@ -600,6 +707,7 @@ function createApiRouter(db) {
         return res.status(400).json({ error: "Photo file too small — use a live camera capture (min 8KB)" });
       }
 
+      let faceVerificationLabel = "none";
       if (req.file) {
         const prof = db.prepare("SELECT phash FROM user_face_profiles WHERE user_id = ?").get(subjectId);
         if (prof && prof.phash) {
@@ -612,15 +720,31 @@ function createApiRouter(db) {
                 error: "Face does not match enrolled profile — use live capture aligned with enrollment.",
               });
             }
+            faceVerificationLabel = "face_matched";
           } catch (e) {
             return res.status(400).json({ error: "Face verification failed: " + (e.message || String(e)) });
           }
+        } else {
+          faceVerificationLabel = "face_captured";
         }
       }
 
       const address = await reverseGeocode(lat, lng);
       const photoPath = req.file ? `/uploads/attendance/${req.file.filename}` : null;
       const devInfo = devicePayload(req);
+      const devShort = String(devInfo).slice(0, 4000);
+      let verificationVal = "ok";
+      if (punchMethod === "face") {
+        verificationVal = faceVerificationLabel;
+      } else if (punchMethod === "fingerprint") {
+        const vs = req.body.verificationStatus ?? req.body.fingerprintStatus;
+        verificationVal =
+          vs === true || vs === 1 || String(vs).toLowerCase() === "verified" ? "verified" : "pending";
+      } else if (punchMethod === "gps") {
+        verificationVal = geo.ok ? "gps_ok" : "gps";
+      } else if (punchMethod === "office") {
+        verificationVal = "office_location";
+      }
 
       const workDate = todayLocalDate();
       const rec = getOrCreateDay(subjectId, workDate);
@@ -641,7 +765,8 @@ function createApiRouter(db) {
         db.prepare(
           `UPDATE attendance_records
            SET punch_in_at = ?, in_lat = ?, in_lng = ?, punch_in_address = ?, punch_in_photo = ?, in_device_info = ?,
-               source = ?, status = ?, last_edited_by = ?
+               source = ?, status = ?, last_edited_by = ?,
+               punch_method_in = ?, device_in = ?, verification_in = ?
            WHERE id = ?`
         ).run(
           nowIso,
@@ -653,6 +778,9 @@ function createApiRouter(db) {
           src,
           computeLateStatus(subject, nowIso),
           actor.id,
+          punchMethod,
+          devShort,
+          verificationVal,
           rec.id
         );
       } else {
@@ -678,9 +806,22 @@ function createApiRouter(db) {
         }
         db.prepare(
           `UPDATE attendance_records
-           SET punch_out_at = ?, out_lat = ?, out_lng = ?, punch_out_address = ?, punch_out_photo = ?, out_device_info = ?, last_edited_by = ?
+           SET punch_out_at = ?, out_lat = ?, out_lng = ?, punch_out_address = ?, punch_out_photo = ?, out_device_info = ?, last_edited_by = ?,
+               punch_method_out = ?, device_out = ?, verification_out = ?
            WHERE id = ?`
-        ).run(nowIso, lat, lng, address, photoPath, devInfo, actor.id, rec.id);
+        ).run(
+          nowIso,
+          lat,
+          lng,
+          address,
+          photoPath,
+          devInfo,
+          actor.id,
+          punchMethod,
+          devShort,
+          verificationVal,
+          rec.id
+        );
       }
 
       const fresh = db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(rec.id);
@@ -815,8 +956,10 @@ function createApiRouter(db) {
     if (!userId || !workDate || !status) {
       return res.status(400).json({ error: "userId, workDate, status required" });
     }
-    const subject = db.prepare("SELECT * FROM users WHERE id = ?").get(Number(userId));
+    const subject = db.prepare("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL").get(Number(userId));
     if (!subject) return res.status(404).json({ error: "User not found" });
+    const scopeMan = assertUserAccess(actor, subject);
+    if (!scopeMan.ok) return res.status(scopeMan.status).json({ error: scopeMan.error });
     const am = subject.allow_manual !== undefined ? Number(subject.allow_manual) : 1;
     if (actor.role !== ROLES.SUPER_ADMIN && am === 0) {
       return res.status(403).json({ error: "Manual attendance disabled for this employee" });
@@ -878,6 +1021,11 @@ function createApiRouter(db) {
     const id = Number(req.params.id);
     const rec = db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(id);
     if (!rec) return res.status(404).json({ error: "Not found" });
+    const subjRow = db
+      .prepare(`SELECT id, branch_id, role FROM users WHERE id = ? AND deleted_at IS NULL`)
+      .get(rec.user_id);
+    const scopeEd = assertUserAccess(actor, subjRow);
+    if (!scopeEd.ok) return res.status(scopeEd.status).json({ error: scopeEd.error });
 
     const {
       status,
@@ -919,6 +1067,13 @@ function createApiRouter(db) {
     const { userId, branchId, from, to, status } = req.query;
 
     if (can(actor, "history:read")) {
+      if (userId) {
+        const chk = assertUserIdAccess(db, actor, userId);
+        if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
+      }
+      if (branchId && isBranchScoped(actor) && Number(branchId) !== Number(actor.branch_id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       let sql = `
         SELECT ar.*, u.full_name, u.email, u.branch_id
         FROM attendance_records ar
@@ -930,10 +1085,13 @@ function createApiRouter(db) {
         sql += " AND ar.user_id = ?";
         params.push(Number(userId));
       }
-      if (branchId) {
+      if (branchId && isOrgWide(actor)) {
         sql += " AND u.branch_id = ?";
         params.push(Number(branchId));
       }
+      const sc = branchScopeSql(actor, "u");
+      sql += sc.sql;
+      params.push(...sc.params);
       if (from) {
         sql += " AND ar.work_date >= ?";
         params.push(String(from));
@@ -977,6 +1135,13 @@ function createApiRouter(db) {
 
     let rows;
     if (can(actor, "history:read")) {
+      if (userId) {
+        const chk = assertUserIdAccess(db, actor, userId);
+        if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
+      }
+      if (branchId && isBranchScoped(actor) && Number(branchId) !== Number(actor.branch_id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       let sql = `
         SELECT ar.*, u.full_name, u.email, u.branch_id
         FROM attendance_records ar
@@ -988,10 +1153,13 @@ function createApiRouter(db) {
         sql += " AND ar.user_id = ?";
         params.push(Number(userId));
       }
-      if (branchId) {
+      if (branchId && isOrgWide(actor)) {
         sql += " AND u.branch_id = ?";
         params.push(Number(branchId));
       }
+      const sc2 = branchScopeSql(actor, "u");
+      sql += sc2.sql;
+      params.push(...sc2.params);
       if (from) {
         sql += " AND ar.work_date >= ?";
         params.push(String(from));
@@ -1050,13 +1218,21 @@ function createApiRouter(db) {
       params.push(actor.id);
     } else {
       if (userId) {
+        const chk = assertUserIdAccess(db, actor, userId);
+        if (!chk.ok) return res.status(chk.status).send(chk.error);
         sql += " AND ar.user_id = ?";
         params.push(Number(userId));
       }
-      if (branchId) {
+      if (branchId && isOrgWide(actor)) {
         sql += " AND u.branch_id = ?";
         params.push(Number(branchId));
       }
+      if (branchId && isBranchScoped(actor) && Number(branchId) !== Number(actor.branch_id)) {
+        return res.status(403).send("Forbidden");
+      }
+      const scEx = branchScopeSql(actor, "u");
+      sql += scEx.sql;
+      params.push(...scEx.params);
     }
     if (from) {
       sql += " AND ar.work_date >= ?";
@@ -1135,13 +1311,21 @@ function createApiRouter(db) {
         params.push(actor.id);
       } else {
         if (userId) {
+          const chk = assertUserIdAccess(db, actor, userId);
+          if (!chk.ok) return res.status(chk.status).send(chk.error);
           sql += " AND ar.user_id = ?";
           params.push(Number(userId));
         }
-        if (branchId) {
+        if (branchId && isOrgWide(actor)) {
           sql += " AND u.branch_id = ?";
           params.push(Number(branchId));
         }
+        if (branchId && isBranchScoped(actor) && Number(branchId) !== Number(actor.branch_id)) {
+          return res.status(403).send("Forbidden");
+        }
+        const scX = branchScopeSql(actor, "u");
+        sql += scX.sql;
+        params.push(...scX.params);
       }
       if (from) {
         sql += " AND ar.work_date >= ?";
@@ -1274,6 +1458,9 @@ function createApiRouter(db) {
       if (!can(req.currentUser, "integrations:sync")) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      if (!isOrgWide(req.currentUser)) {
+        return res.status(403).json({ error: "Full sync is restricted to Super Admin / Admin" });
+      }
       const result = await fullSyncAll(db);
       res.json(result);
     } catch (e) {
@@ -1295,6 +1482,9 @@ function createApiRouter(db) {
         WHERE 1=1
       `;
       const params = [];
+      const scGs = branchScopeSql(req.currentUser, "u");
+      sql += scGs.sql;
+      params.push(...scGs.params);
       if (from) {
         sql += " AND ar.work_date >= ?";
         params.push(String(from));
@@ -1343,9 +1533,16 @@ function createApiRouter(db) {
       WHERE ar.work_date BETWEEN ? AND ?
     `;
     const params = [fromDate, toDate];
-    if (branchId) {
+    if (branchId && isOrgWide(actor)) {
       sql += " AND u.branch_id = ?";
       params.push(Number(branchId));
+    }
+    if (isBranchScoped(actor)) {
+      if (actor.branch_id == null) {
+        return res.json({ scope: "org", from: fromDate, to: toDate, rows: [] });
+      }
+      sql += " AND u.branch_id = ?";
+      params.push(actor.branch_id);
     }
     sql += " GROUP BY u.branch_id, b.name, ar.status ORDER BY b.name, ar.status";
     const rows = db.prepare(sql).all(...params);
@@ -1365,8 +1562,14 @@ function createApiRouter(db) {
     mon.setDate(now.getDate() + mondayOffset);
     const weekStart = mon.toISOString().slice(0, 10);
 
+    const sc = branchScopeSql(actor, "u");
+    const scSql = sc.sql;
+    const scParams = sc.params;
+
     const totalStaff = Number(
-      db.prepare("SELECT COUNT(*) AS c FROM users WHERE active = 1 AND deleted_at IS NULL").get().c
+      db
+        .prepare(`SELECT COUNT(*) AS c FROM users u WHERE u.active = 1 AND u.deleted_at IS NULL${scSql}`)
+        .get(...scParams).c
     );
 
     if (can(actor, "dashboard:read_self") && !can(actor, "dashboard:read")) {
@@ -1409,10 +1612,10 @@ function createApiRouter(db) {
         `SELECT ar.status, COUNT(*) AS c
          FROM attendance_records ar
          JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
-         WHERE ar.work_date = ?
+         WHERE ar.work_date = ?${scSql}
          GROUP BY ar.status`
       )
-      .all(today);
+      .all(today, ...scParams);
     const smap = Object.fromEntries(statusRows.map((x) => [x.status, x.c]));
     const present = (smap.present || 0) + (smap.half || 0);
     const late = smap.late || 0;
@@ -1423,33 +1626,57 @@ function createApiRouter(db) {
       db
         .prepare(
           `SELECT COUNT(*) AS c FROM attendance_records ar
-           JOIN users u ON u.id = ar.user_id AND u.active = 1
-           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NULL`
+           JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
+           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NULL${scSql}`
         )
-        .get(today).c
+        .get(today, ...scParams).c
     );
 
     const lateWeek = db
       .prepare(
         `SELECT u.full_name AS name, u.id AS userId, COUNT(*) AS lateDays
          FROM attendance_records ar
-         JOIN users u ON u.id = ar.user_id AND u.active = 1
-         WHERE ar.work_date >= ? AND ar.status = 'late'
+         JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
+         WHERE ar.work_date >= ? AND ar.status = 'late'${scSql}
          GROUP BY u.id
          HAVING COUNT(*) >= 3`
       )
-      .all(weekStart);
+      .all(weekStart, ...scParams);
 
     let leavePending = 0;
     let documentCompliancePct = 100;
     try {
-      leavePending = Number(db.prepare("SELECT COUNT(*) AS c FROM leave_requests WHERE final_status = 'PENDING'").get().c);
+      leavePending = Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM leave_requests lr
+             JOIN users u ON u.id = lr.user_id AND u.deleted_at IS NULL
+             WHERE lr.final_status = 'PENDING'${scSql}`
+          )
+          .get(...scParams).c
+      );
     } catch {
       leavePending = 0;
     }
     try {
-      const docTotal = Number(db.prepare("SELECT COUNT(*) AS c FROM employee_documents").get().c);
-      const docOk = Number(db.prepare("SELECT COUNT(*) AS c FROM employee_documents WHERE verified = 1").get().c);
+      const docTotal = Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM employee_documents d
+             JOIN users u ON u.id = d.user_id
+             WHERE 1=1${scSql}`
+          )
+          .get(...scParams).c
+      );
+      const docOk = Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM employee_documents d
+             JOIN users u ON u.id = d.user_id
+             WHERE d.verified = 1${scSql}`
+          )
+          .get(...scParams).c
+      );
       if (docTotal > 0) {
         documentCompliancePct = Math.round((docOk / docTotal) * 100);
       } else {
@@ -1465,9 +1692,12 @@ function createApiRouter(db) {
     try {
       const pr = db
         .prepare(
-          `SELECT COALESCE(SUM(gross_inr),0) AS g, COALESCE(SUM(deductions_inr),0) AS d FROM payroll_entries WHERE period = ?`
+          `SELECT COALESCE(SUM(p.gross_inr),0) AS g, COALESCE(SUM(p.deductions_inr),0) AS d
+           FROM payroll_entries p
+           JOIN users u ON u.id = p.user_id
+           WHERE p.period = ?${scSql}`
         )
-        .get(payrollPeriod);
+        .get(payrollPeriod, ...scParams);
       payrollGross = Number(pr.g) || 0;
       payrollDed = Number(pr.d) || 0;
     } catch {
@@ -1475,47 +1705,67 @@ function createApiRouter(db) {
       payrollDed = 0;
     }
 
-    const staffByBranch = db
-      .prepare(
-        `SELECT b.name AS name, COUNT(u.id) AS staffCount
-         FROM branches b
-         LEFT JOIN users u ON u.branch_id = b.id AND u.active = 1
-         GROUP BY b.id
-         ORDER BY b.name`
-      )
-      .all();
+    let staffByBranch;
+    if (isOrgWide(actor)) {
+      staffByBranch = db
+        .prepare(
+          `SELECT b.name AS name, COUNT(u.id) AS staffCount
+           FROM branches b
+           LEFT JOIN users u ON u.branch_id = b.id AND u.active = 1 AND u.deleted_at IS NULL
+           GROUP BY b.id
+           ORDER BY b.name`
+        )
+        .all();
+    } else if (isBranchScoped(actor) && actor.branch_id != null) {
+      staffByBranch = db
+        .prepare(
+          `SELECT b.name AS name, COUNT(u.id) AS staffCount
+           FROM branches b
+           LEFT JOIN users u ON u.branch_id = b.id AND u.active = 1 AND u.deleted_at IS NULL
+           WHERE b.id = ?
+           GROUP BY b.id`
+        )
+        .all(actor.branch_id);
+    } else {
+      staffByBranch = [];
+    }
 
-    const offices = Number(db.prepare("SELECT COUNT(*) AS c FROM branches").get().c);
+    const offices = isOrgWide(actor)
+      ? Number(db.prepare("SELECT COUNT(*) AS c FROM branches").get().c)
+      : isBranchScoped(actor) && actor.branch_id != null
+        ? 1
+        : 0;
 
     const liveIn = Number(
       db
         .prepare(
           `SELECT COUNT(*) AS c FROM attendance_records ar
-           JOIN users u ON u.id = ar.user_id
-           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NULL`
+           JOIN users u ON u.id = ar.user_id AND u.deleted_at IS NULL
+           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NULL${scSql}`
         )
-        .get(today).c
+        .get(today, ...scParams).c
     );
 
     const lateToday = db
       .prepare(
         `SELECT u.full_name AS name, ar.status AS status, ar.work_date AS workDate
          FROM attendance_records ar
-         JOIN users u ON u.id = ar.user_id
-         WHERE ar.work_date = ? AND ar.status = 'late' LIMIT 8`
+         JOIN users u ON u.id = ar.user_id AND u.deleted_at IS NULL
+         WHERE ar.work_date = ? AND ar.status = 'late'${scSql}
+         LIMIT 8`
       )
-      .all(today);
+      .all(today, ...scParams);
 
     const topRows = db
       .prepare(
         `SELECT u.full_name AS name, b.name AS branch
          FROM users u
          LEFT JOIN branches b ON b.id = u.branch_id
-         WHERE u.active = 1 AND u.deleted_at IS NULL
+         WHERE u.active = 1 AND u.deleted_at IS NULL${scSql}
          ORDER BY u.id ASC
          LIMIT 5`
       )
-      .all();
+      .all(...scParams);
     const scores = [98, 96, 94, 92, 90];
     const topPerformers = topRows.map((r, i) => ({
       name: r.name,
@@ -1529,19 +1779,19 @@ function createApiRouter(db) {
       db
         .prepare(
           `SELECT COUNT(*) AS c FROM attendance_records ar
-           INNER JOIN users u ON u.id = ar.user_id AND u.active = 1
-           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL`
+           INNER JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
+           WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL${scSql}`
         )
-        .get(today).c
+        .get(today, ...scParams).c
     );
     const punchOutCount = Number(
       db
         .prepare(
           `SELECT COUNT(*) AS c FROM attendance_records ar
-           INNER JOIN users u ON u.id = ar.user_id AND u.active = 1
-           WHERE ar.work_date = ? AND ar.punch_out_at IS NOT NULL`
+           INNER JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
+           WHERE ar.work_date = ? AND ar.punch_out_at IS NOT NULL${scSql}`
         )
-        .get(today).c
+        .get(today, ...scParams).c
     );
 
     let noticeReadSummary = { activeNotices: 0, totalReads: 0, approxUnseen: 0 };
@@ -1561,9 +1811,9 @@ function createApiRouter(db) {
       .prepare(
         `SELECT ar.punch_in_at, ar.punch_out_at FROM attendance_records ar
          INNER JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
-         WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NOT NULL`
+         WHERE ar.work_date = ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NOT NULL${scSql}`
       )
-      .all(today);
+      .all(today, ...scParams);
     const totalMinutesWorkedToday = workedRows.reduce(
       (acc, r) => acc + minutesBetweenIso(r.punch_in_at, r.punch_out_at),
       0
@@ -1579,9 +1829,9 @@ function createApiRouter(db) {
       .prepare(
         `SELECT ar.punch_in_at, ar.punch_out_at FROM attendance_records ar
          INNER JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
-         WHERE ar.work_date >= ? AND ar.work_date <= ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NOT NULL`
+         WHERE ar.work_date >= ? AND ar.work_date <= ? AND ar.punch_in_at IS NOT NULL AND ar.punch_out_at IS NOT NULL${scSql}`
       )
-      .all(monthStart, monthEnd);
+      .all(monthStart, monthEnd, ...scParams);
     const totalMinutesWorkedMonth = monthRows.reduce(
       (acc, r) => acc + minutesBetweenIso(r.punch_in_at, r.punch_out_at),
       0
@@ -1595,12 +1845,12 @@ function createApiRouter(db) {
           `SELECT u.full_name AS name, u.id AS userId, COUNT(*) AS approvedLeaves
            FROM leave_requests lr
            JOIN users u ON u.id = lr.user_id AND u.deleted_at IS NULL
-           WHERE lr.final_status = 'APPROVED' AND lr.start_date >= ?
+           WHERE lr.final_status = 'APPROVED' AND lr.start_date >= ?${scSql}
            GROUP BY u.id
            HAVING COUNT(*) > 4
            ORDER BY approvedLeaves DESC LIMIT 12`
         )
-        .all(yearStart);
+        .all(yearStart, ...scParams);
     } catch {
       highLeaveUsers = [];
     }
@@ -1610,12 +1860,12 @@ function createApiRouter(db) {
         `SELECT u.full_name AS name, u.id AS userId, COUNT(*) AS lateDays
          FROM attendance_records ar
          JOIN users u ON u.id = ar.user_id AND u.active = 1 AND u.deleted_at IS NULL
-         WHERE ar.work_date >= date('now', '-14 days') AND ar.status = 'late'
+         WHERE ar.work_date >= date('now', '-14 days') AND ar.status = 'late'${scSql}
          GROUP BY u.id
          HAVING COUNT(*) >= 3
          ORDER BY lateDays DESC LIMIT 12`
       )
-      .all();
+      .all(...scParams);
 
     res.json({
       scope: "org",
@@ -1693,9 +1943,20 @@ function createApiRouter(db) {
       WHERE ar.work_date = ? AND ar.status = ?
     `;
     const params = [today, status];
-    if (branchId) {
+    const actor = req.currentUser;
+    if (branchId && isOrgWide(actor)) {
       sql += " AND u.branch_id = ?";
       params.push(branchId);
+    }
+    if (branchId && isBranchScoped(actor) && Number(branchId) !== Number(actor.branch_id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (isBranchScoped(actor)) {
+      if (actor.branch_id == null) {
+        return res.json({ date: today, status, people: [] });
+      }
+      sql += " AND u.branch_id = ?";
+      params.push(actor.branch_id);
     }
     sql += " ORDER BY u.full_name LIMIT 500";
     const people = db.prepare(sql).all(...params);
@@ -1748,6 +2009,9 @@ function createApiRouter(db) {
       params.push(actor.id);
     } else {
       sql += " AND u.active = 1";
+      const scMs = branchScopeSql(actor, "u");
+      sql += scMs.sql;
+      params.push(...scMs.params);
     }
     sql += " GROUP BY u.id ORDER BY u.full_name LIMIT 2000";
     const rows = db.prepare(sql).all(...params);
@@ -1762,6 +2026,9 @@ function createApiRouter(db) {
   });
 
   router.post("/branches", attachUser, requirePerm("branches:write"), (req, res) => {
+    if (!isOrgWide(req.currentUser)) {
+      return res.status(403).json({ error: "Only Super Admin / Admin can create branches" });
+    }
     const { name, lat, lng, radius_meters } = req.body || {};
     if (!name) return res.status(400).json({ error: "name required" });
     const info = db
@@ -1777,6 +2044,9 @@ function createApiRouter(db) {
   });
 
   router.patch("/branches/:id", attachUser, requirePerm("branches:write"), (req, res) => {
+    if (!isOrgWide(req.currentUser)) {
+      return res.status(403).json({ error: "Only Super Admin / Admin can edit branches" });
+    }
     const id = Number(req.params.id);
     const { name, lat, lng, radius_meters } = req.body || {};
     db.prepare(
@@ -1799,13 +2069,14 @@ function createApiRouter(db) {
     if (!can(req.currentUser, "users:read")) {
       return res.status(403).json({ error: "Forbidden" });
     }
+    const scU = branchScopeSql(req.currentUser, "u");
     const users = db
       .prepare(
         `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at, mobile, department,
          COALESCE(allow_gps,1) AS allow_gps, COALESCE(allow_face,0) AS allow_face, COALESCE(allow_manual,1) AS allow_manual
-         FROM users ORDER BY full_name`
+         FROM users u WHERE u.deleted_at IS NULL${scU.sql} ORDER BY u.full_name`
       )
-      .all();
+      .all(...scU.params);
     res.json({ users });
   });
 
@@ -1835,6 +2106,14 @@ function createApiRouter(db) {
     }
     if (role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Only Super Admin can create another Super Admin" });
+    }
+    const arCheck = assertRoleAssignableOnCreate(req.currentUser, role);
+    if (!arCheck.ok) return res.status(arCheck.status).json({ error: arCheck.error });
+    if (isBranchScoped(req.currentUser)) {
+      const bid = branch_id != null ? Number(branch_id) : req.currentUser.branch_id;
+      if (req.currentUser.branch_id == null || Number(bid) !== Number(req.currentUser.branch_id)) {
+        return res.status(403).json({ error: "Users must be assigned to your branch" });
+      }
     }
     const hash = bcrypt.hashSync(String(password), 10);
     const ag = allow_gps !== undefined ? (allow_gps ? 1 : 0) : 1;
@@ -1885,8 +2164,10 @@ function createApiRouter(db) {
 
   router.patch("/users/:id", attachUser, requirePerm("users:update"), (req, res) => {
     const id = Number(req.params.id);
-    const target = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+    const target = db.prepare("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
     if (!target) return res.status(404).json({ error: "Not found" });
+    const scopeU = assertUserAccess(req.currentUser, target);
+    if (!scopeU.ok) return res.status(scopeU.status).json({ error: scopeU.error });
     if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
     }
@@ -1907,8 +2188,11 @@ function createApiRouter(db) {
     if (password != null && String(password).length > 0 && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Only Super Admin may set password" });
     }
-    if (role && role !== target.role && req.currentUser.role !== ROLES.SUPER_ADMIN) {
-      return res.status(403).json({ error: "Only Super Admin may change roles" });
+    if (role && role !== target.role && !isOrgWide(req.currentUser)) {
+      return res.status(403).json({ error: "Only Super Admin or Admin may change roles" });
+    }
+    if (role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin may assign Super Admin role" });
     }
     const branchVal = branch_id === undefined ? null : branch_id;
     const activeVal = active === undefined ? null : active ? 1 : 0;
@@ -2394,12 +2678,15 @@ function createApiRouter(db) {
           .all(period, actor.id);
     const sumGross = entries.reduce((a, e) => a + (Number(e.gross_inr) || 0), 0);
     const sumDed = entries.reduce((a, e) => a + (Number(e.deductions_inr) || 0), 0);
+    const sumNet = entries.reduce((a, e) => a + (Number(e.net_inr) || 0), 0);
+    const sumIncentive = entries.reduce((a, e) => a + (Number(e.incentive_inr) || 0), 0);
     res.json({
       period,
       totals: {
         gross_inr: sumGross,
         deductions_inr: sumDed,
-        net_inr: sumGross - sumDed,
+        net_inr: sumNet,
+        incentive_inr: sumIncentive,
         count: entries.length,
       },
       entries,
