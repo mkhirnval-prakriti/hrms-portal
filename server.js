@@ -70,8 +70,8 @@ app.get("/reports", forwardToApiRouter("/reports"));
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+app.get("/", (_req, res) => {
+  res.redirect(302, "/app/");
 });
 
 app.use(express.static("public"));
@@ -91,6 +91,12 @@ app.get(/^\/portal(\/.*)?$/, (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
   if (path.extname(req.path)) return next();
   res.sendFile(path.join(__dirname, "public", "portal", "index.html"));
+});
+
+/** React + Tailwind HRMS UI (Vite build → public/app) */
+app.use("/app", express.static(path.join(__dirname, "public", "app")));
+app.get(/^\/app\/?$/, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "app", "index.html"));
 });
 
 const server = app.listen(PORT, () => {

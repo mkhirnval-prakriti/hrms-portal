@@ -8,6 +8,8 @@
   },
   "scripts": {
     "start": "node server.js",
+    "build": "npm run build:client",
+    "build:client": "cd client && npm install && npm run build",
     "sheets:smoke": "node scripts/google-sheets-smoke-test.js"
   },
   "keywords": [],

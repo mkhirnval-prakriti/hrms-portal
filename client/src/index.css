@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-ph-green: #1b5e20;
+  --color-ph-green-mid: #2e7d32;
+  --color-ph-green-light: #66bb6a;
+  --color-ph-mint: #a5d6a7;
+  --color-ph-bg: #f0f4f1;
+  --color-ph-card: #ffffff;
+  --color-ph-brown: #8d6e63;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-ph-bg);
+  color: #1a2e1c;
+}
+
+.ph-gradient {
+  background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 45%, #388e3c 100%);
+}
+
+.ph-card {
+  @apply rounded-xl border border-emerald-100/80 bg-white shadow-[0_8px_30px_rgba(27,94,32,0.08)] transition hover:shadow-[0_12px_36px_rgba(27,94,32,0.12)];
+}

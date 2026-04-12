@@ -6,7 +6,7 @@ services:
     runtime: node
     plan: starter
     region: oregon
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm start
     disk:
       name: hrms-data

@@ -157,6 +157,16 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
   `);
 
+  const namedBranches = ["Jaipur", "Amritsar", "CA OFFICE MEERUT"];
+  for (const nm of namedBranches) {
+    const ex = db.prepare("SELECT id FROM branches WHERE name = ?").get(nm);
+    if (!ex) {
+      db.prepare(
+        "INSERT INTO branches (name, lat, lng, radius_meters) VALUES (?,?,?,400)"
+      ).run(nm, null, null);
+    }
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS apps_script_sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
