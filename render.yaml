@@ -1,4 +1,7 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# ONE Web Service: API + React SPA (/app) + legacy portal (/portal). Same origin for sessions.
+#
 # Persistent disks require a paid instance type (not Free). Adjust `plan` if needed.
 services:
   - type: web
@@ -8,6 +11,7 @@ services:
     region: oregon
     buildCommand: npm install && npm run build
     startCommand: npm start
+    healthCheckPath: /health
     disk:
       name: hrms-data
       mountPath: /data
