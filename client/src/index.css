@@ -2,6 +2,7 @@
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "DM Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
   --color-ph-brand: #1f5e3b;
   --color-ph-green-mid: #2e7d32;
   --color-ph-green-light: #66bb6a;
@@ -15,6 +16,10 @@ html,
 body,
 #root {
   height: 100%;
+}
+
+.font-display {
+  font-family: var(--font-display);
 }
 
 body {

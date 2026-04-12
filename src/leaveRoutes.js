@@ -1,4 +1,5 @@
 const { ROLES } = require("./rbac");
+const { notifyLeaveWhatsApp } = require("./whatsapp");
 
 function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, auditLeave }) {
   function afterLeaveChange(leaveId) {
@@ -117,6 +118,7 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
       auditLeave(req.currentUser.id, "leave_manager_reject", row.id, {});
     }
     afterLeaveChange(row.id);
+    setImmediate(() => notifyLeaveWhatsApp(db, row.id).catch(() => {}));
     res.json({ leave: updated });
   });
 
@@ -147,6 +149,7 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
       auditLeave(req.currentUser.id, "leave_admin_approve", row.id, {});
     }
     afterLeaveChange(row.id);
+    setImmediate(() => notifyLeaveWhatsApp(db, row.id).catch(() => {}));
     res.json({ leave: updated });
   });
 
@@ -174,6 +177,7 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
       auditLeave(req.currentUser.id, "leave_admin_reject", row.id, {});
     }
     afterLeaveChange(row.id);
+    setImmediate(() => notifyLeaveWhatsApp(db, row.id).catch(() => {}));
     res.json({ leave: updated });
   });
 }

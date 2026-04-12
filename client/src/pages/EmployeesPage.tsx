@@ -226,7 +226,7 @@ export function EmployeesPage() {
               </thead>
               <tbody>
                 {list.map((r) => (
-                  <tr key={r.id} className="border-b border-[#1f5e3b]/5">
+                  <tr key={r.id} id={`emp-row-${r.id}`} className="border-b border-[#1f5e3b]/5">
                     <td className="py-2 pr-3 font-medium">{r.name}</td>
                     <td className="py-2 pr-3 text-xs">{r.email}</td>
                     <td className="py-2 pr-3">{r.role}</td>

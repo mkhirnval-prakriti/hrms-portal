@@ -1,12 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 
 type Live = { date?: string; currently_in?: unknown[] }
 
+type SearchRes = {
+  employees: { id: number; full_name: string; email: string; login_id?: string | null }[]
+  branches: { id: number; name: string }[]
+}
+
 function roleLabel(role: string) {
   const m: Record<string, string> = {
     SUPER_ADMIN: 'Super Admin',
+    ADMIN: 'Admin',
     ATTENDANCE_MANAGER: 'HR',
     LOCATION_MANAGER: 'Location',
     USER: 'Employee',
@@ -19,16 +26,51 @@ type TopBarProps = {
 }
 
 export function TopBar({ onMenu }: TopBarProps) {
+  const nav = useNavigate()
   const { user: me } = useAuth()
   const [live, setLive] = useState<number | null>(null)
   const [q, setQ] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchData, setSearchData] = useState<SearchRes | null>(null)
   const base = import.meta.env.BASE_URL
 
   useEffect(() => {
     api<Live>('/attendance/live-status')
       .then((d) => setLive(Array.isArray(d.currently_in) ? d.currently_in.length : 0))
       .catch(() => setLive(null))
+    const t = window.setInterval(() => {
+      api<Live>('/attendance/live-status')
+        .then((d) => setLive(Array.isArray(d.currently_in) ? d.currently_in.length : 0))
+        .catch(() => setLive(null))
+    }, 30000)
+    return () => window.clearInterval(t)
   }, [])
+
+  useEffect(() => {
+    if (q.trim().length < 1) {
+      setSearchData(null)
+      return
+    }
+    const h = window.setTimeout(() => {
+      api<SearchRes>('/search?q=' + encodeURIComponent(q.trim()))
+        .then(setSearchData)
+        .catch(() => setSearchData({ employees: [], branches: [] }))
+    }, 320)
+    return () => window.clearTimeout(h)
+  }, [q])
+
+  const goEmployee = useCallback(
+    (id: number) => {
+      setSearchOpen(false)
+      setQ('')
+      nav('/employees')
+      window.setTimeout(() => {
+        const el = document.getElementById(`emp-row-${id}`)
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 300)
+    },
+    [nav]
+  )
 
   return (
     <header className="sticky top-0 z-30 border-b border-[#1f5e3b]/8 bg-white/80 ph-glass">
@@ -62,9 +104,36 @@ export function TopBar({ onMenu }: TopBarProps) {
             type="search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Staff खोजें (नाम / ID)..."
+            onFocus={() => setSearchOpen(true)}
+            onBlur={() => window.setTimeout(() => setSearchOpen(false), 200)}
+            placeholder="Search name, email, ID, branch…"
             className="w-full rounded-xl border border-[#1f5e3b]/10 bg-white/95 py-2.5 pl-10 pr-4 text-sm text-[#14261a] shadow-inner outline-none ring-0 transition focus:border-[#66bb6a]/40 focus:ring-4 focus:ring-[#1f5e3b]/8"
           />
+          {searchOpen && q.trim().length > 0 && searchData && (
+            <div className="absolute left-0 right-0 top-full z-40 mt-1 max-h-72 overflow-y-auto rounded-xl border border-[#1f5e3b]/10 bg-white py-2 shadow-xl">
+              {searchData.employees.length === 0 && searchData.branches.length === 0 && (
+                <div className="px-3 py-2 text-xs text-[#1f5e3b]/60">No matches</div>
+              )}
+              {searchData.employees.map((e) => (
+                <button
+                  key={e.id}
+                  type="button"
+                  className="flex w-full flex-col items-start px-3 py-2 text-left text-sm hover:bg-[#1f5e3b]/5"
+                  onMouseDown={() => goEmployee(e.id)}
+                >
+                  <span className="font-medium text-[#14261a]">{e.full_name}</span>
+                  <span className="text-xs text-[#1f5e3b]/65">
+                    {e.login_id || e.email}
+                  </span>
+                </button>
+              ))}
+              {searchData.branches.map((b) => (
+                <div key={b.id} className="px-3 py-1.5 text-xs text-[#1f5e3b]/80">
+                  Branch: <strong>{b.name}</strong>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2 sm:gap-3">

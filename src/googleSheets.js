@@ -526,11 +526,26 @@ function buildAuditFlat(a) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function scheduleSheets(db, label, fn) {
   setImmediate(async () => {
     try {
       if (!isSyncEnabled(db)) return;
-      await fn();
+      let lastErr;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await fn();
+          return;
+        } catch (e) {
+          lastErr = e;
+          console.error(`[googleSheets] ${label} attempt ${attempt}`, e.message);
+          if (attempt < 3) await sleep(400 * attempt);
+        }
+      }
+      throw lastErr;
     } catch (e) {
       console.error(`[googleSheets] ${label}`, e.message);
       try {

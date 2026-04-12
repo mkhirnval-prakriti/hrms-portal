@@ -97,6 +97,13 @@ function migrate(db) {
   }
   tryAddColumn(db, "users", "mobile TEXT");
   tryAddColumn(db, "users", "department TEXT");
+  tryAddColumn(db, "users", "allow_gps INTEGER NOT NULL DEFAULT 1");
+  tryAddColumn(db, "users", "allow_face INTEGER NOT NULL DEFAULT 0");
+  tryAddColumn(db, "users", "allow_manual INTEGER NOT NULL DEFAULT 1");
+  tryAddColumn(db, "users", "allow_biometric INTEGER NOT NULL DEFAULT 0");
+  tryAddColumn(db, "users", "deleted_at TEXT");
+
+  tryAddColumn(db, "branches", "address TEXT");
 
   const attCols = [
     ["punch_in_address", "TEXT"],
@@ -111,6 +118,15 @@ function migrate(db) {
       tryAddColumn(db, "attendance_records", `${c} TEXT`);
     }
   }
+
+  tryAddColumn(db, "notices", "visible_from TEXT");
+  tryAddColumn(db, "notices", "visible_until TEXT");
+  tryAddColumn(db, "notices", "repeat_rule TEXT");
+  tryAddColumn(db, "notices", "show_on_punch INTEGER NOT NULL DEFAULT 1");
+
+  tryAddColumn(db, "employee_documents", "account_number TEXT");
+  tryAddColumn(db, "employee_documents", "ifsc TEXT");
+  tryAddColumn(db, "employee_documents", "bank_name TEXT");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS leave_requests (
@@ -169,6 +185,90 @@ function migrate(db) {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_payroll_entries_period ON payroll_entries(period);
+
+    CREATE TABLE IF NOT EXISTS system_guides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      body TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_by INTEGER NOT NULL,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS notice_reads (
+      notice_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      read_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (notice_id, user_id),
+      FOREIGN KEY (notice_id) REFERENCES notices(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notice_reads_user ON notice_reads(user_id);
+
+    CREATE TABLE IF NOT EXISTS user_face_profiles (
+      user_id INTEGER PRIMARY KEY,
+      phash TEXT NOT NULL,
+      reference_path TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS notice_replies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notice_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (notice_id) REFERENCES notices(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notice_replies_notice ON notice_replies(notice_id);
+
+    CREATE TABLE IF NOT EXISTS hr_chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_user_id INTEGER NOT NULL,
+      author_id INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      read_by_other INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (thread_user_id) REFERENCES users(id),
+      FOREIGN KEY (author_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_chat_thread ON hr_chat_messages(thread_user_id);
+
+    CREATE TABLE IF NOT EXISTS hr_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'warning',
+      message TEXT NOT NULL,
+      user_id INTEGER,
+      actor_id INTEGER,
+      meta TEXT,
+      read_by_admin INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (actor_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_alerts_created ON hr_alerts(created_at);
+
+    CREATE TABLE IF NOT EXISTS login_otps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
   `);
 
   db.exec(`
@@ -190,7 +290,7 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
   `);
 
-  const namedBranches = ["Jaipur", "Amritsar", "CA OFFICE MEERUT"];
+  const namedBranches = ["Amritsar", "Jaipur", "Derabassi"];
   for (const nm of namedBranches) {
     const ex = db.prepare("SELECT id FROM branches WHERE name = ?").get(nm);
     if (!ex) {
@@ -319,7 +419,7 @@ function seedInitialOrg(db) {
     10
   );
   insertUser.run({
-    email: "mandeep@prakriti.local",
+    email: process.env.SUPER_ADMIN_EMAIL || "MKHIRNVAL@gmail.com",
     login_id: "prakritiherbs",
     hash: mandeepHash,
     name: "Mandeep Kumar",
@@ -387,7 +487,7 @@ function ensurePrakritiSuperAdmin(db) {
       role: ROLES.SUPER_ADMIN,
       hash,
       lid: "prakritiherbs",
-      em: "mandeep@prakriti.local",
+      em: process.env.SUPER_ADMIN_EMAIL || "MKHIRNVAL@gmail.com",
       id: byLogin.id,
     });
     return;
@@ -407,7 +507,7 @@ function ensurePrakritiSuperAdmin(db) {
     ).run({
       name: "Mandeep Kumar",
       lid: "prakritiherbs",
-      em: "mandeep@prakriti.local",
+      em: process.env.SUPER_ADMIN_EMAIL || "MKHIRNVAL@gmail.com",
       hash,
       role: ROLES.SUPER_ADMIN,
       id: firstSuper.id,
@@ -418,7 +518,7 @@ function ensurePrakritiSuperAdmin(db) {
     `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, shift_start, shift_end, grace_minutes)
      VALUES (@email, @lid, @hash, @name, @role, @bid, '09:00', '18:00', 15)`
   ).run({
-    email: "mandeep@prakriti.local",
+    email: process.env.SUPER_ADMIN_EMAIL || "MKHIRNVAL@gmail.com",
     lid: "prakritiherbs",
     hash,
     name: "Mandeep Kumar",

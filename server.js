@@ -4,9 +4,17 @@ const session = require("express-session");
 const { openDb } = require("./src/db");
 const { createApiRouter } = require("./src/api");
 const { runStartupSmokeTest } = require("./src/appsScriptSync");
+const { sendDailyHrmsReport } = require("./src/dailyReport");
 
 const app = express();
 app.set("trust proxy", 1);
+
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -110,6 +118,9 @@ const server = app.listen(PORT, HOST, () => {
   setImmediate(() => {
     runStartupSmokeTest(db).catch((e) => console.error("[appsScriptSync] startup test", e.message));
   });
+  setInterval(() => {
+    sendDailyHrmsReport(db).catch((e) => console.error("[dailyReport]", e.message));
+  }, 24 * 60 * 60 * 1000);
 });
 
 server.on("error", (err) => {
