@@ -16,6 +16,7 @@ export type AuthUser = {
   full_name: string
   role: string
   branch_id: number | null
+  permissions?: Record<string, boolean>
 }
 
 type AuthContextValue = {
@@ -35,6 +36,7 @@ type LoginSuccessPayload = {
   full_name: string
   role: string
   branch_id?: number | null
+  permissions?: Record<string, boolean>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -47,6 +49,7 @@ function mapLoginToUser(data: LoginSuccessPayload): AuthUser {
     full_name: data.full_name,
     role: data.role,
     branch_id: data.branch_id ?? null,
+    permissions: data.permissions,
   }
 }
 
@@ -63,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     let cancelled = false
-    api<AuthUser>('/auth/me')
+    api<AuthUser & { permissions?: Record<string, boolean> }>('/auth/me')
       .then((me) => {
         if (!cancelled) {
           setUser(me)
@@ -99,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setInitializing(true)
     try {
-      const me = await api<AuthUser>('/auth/me')
+      const me = await api<AuthUser & { permissions?: Record<string, boolean> }>('/auth/me')
       setUser(me)
     } catch {
       persistToken(null)

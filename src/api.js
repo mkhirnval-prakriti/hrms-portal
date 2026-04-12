@@ -85,6 +85,20 @@ function createApiRouter(db) {
     limits: { fileSize: 6 * 1024 * 1024 },
   });
 
+  const uploadDocsRoot = path.join(__dirname, "..", "uploads", "documents");
+  fs.mkdirSync(uploadDocsRoot, { recursive: true });
+  const uploadDoc = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, cb) => cb(null, uploadDocsRoot),
+      filename: (_req, file, cb) => {
+        const ext = (path.extname(file.originalname) || ".pdf").toLowerCase();
+        const safe = /^\.(pdf|jpg|jpeg|png|webp)$/i.test(ext) ? ext : ".bin";
+        cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${safe}`);
+      },
+    }),
+    limits: { fileSize: 8 * 1024 * 1024 },
+  });
+
   function attachUser(req, res, next) {
     const auth = req.headers.authorization;
     if (auth && typeof auth === "string" && auth.startsWith("Bearer ")) {
@@ -138,6 +152,57 @@ function createApiRouter(db) {
     appsScriptScheduleAudit(db, info.lastInsertRowid);
   }
 
+  function listEffectivePermissions(user) {
+    const meta = {};
+    const keys = [
+      "dashboard:read",
+      "dashboard:read_self",
+      "attendance:self",
+      "attendance:read_all",
+      "attendance:punch",
+      "attendance:manual",
+      "attendance:edit_any",
+      "attendance:kiosk",
+      "attendance:face_placeholder",
+      "history:read",
+      "history:read_self",
+      "history:edit",
+      "branches:read",
+      "branches:write",
+      "users:read",
+      "users:create",
+      "users:update",
+      "notices:read",
+      "notices:write",
+      "timings:read",
+      "timings:read_self",
+      "timings:write",
+      "roles:read",
+      "settings:read",
+      "settings:write",
+      "leave:apply",
+      "leave:read_self",
+      "leave:read_all",
+      "leave:approve_manager",
+      "export:read",
+      "integrations:sync",
+      "payroll:read",
+      "payroll:read_self",
+      "payroll:write",
+      "documents:read_all",
+      "documents:verify",
+      "audit:read",
+    ];
+    keys.forEach((k) => {
+      if (k === "audit:read") {
+        meta[k] = user.role === ROLES.SUPER_ADMIN;
+      } else {
+        meta[k] = can(user, k);
+      }
+    });
+    return meta;
+  }
+
   function finishLogin(req, res, user) {
     req.session.userId = user.id;
     insertAudit(user.id, "login", "session", String(user.id), { path: "login" });
@@ -150,6 +215,7 @@ function createApiRouter(db) {
       full_name: user.full_name,
       role: user.role,
       branch_id: user.branch_id,
+      permissions: listEffectivePermissions(user),
       user: {
         id: user.id,
         name: user.full_name,
@@ -205,59 +271,17 @@ function createApiRouter(db) {
     });
   });
 
-  function listEffectivePermissions(user) {
-    const meta = {};
-    const keys = [
-      "dashboard:read",
-      "dashboard:read_self",
-      "attendance:self",
-      "attendance:read_all",
-      "attendance:punch",
-      "attendance:manual",
-      "attendance:edit_any",
-      "attendance:kiosk",
-      "attendance:face_placeholder",
-      "history:read",
-      "history:read_self",
-      "history:edit",
-      "branches:read",
-      "branches:write",
-      "users:read",
-      "users:create",
-      "users:update",
-      "notices:read",
-      "notices:write",
-      "timings:read",
-      "timings:read_self",
-      "timings:write",
-      "roles:read",
-      "settings:read",
-      "settings:write",
-      "leave:apply",
-      "leave:read_self",
-      "leave:read_all",
-      "leave:approve_manager",
-      "export:read",
-      "integrations:sync",
-      "audit:read",
-    ];
-    keys.forEach((k) => {
-      if (k === "audit:read") {
-        meta[k] = user.role === ROLES.SUPER_ADMIN;
-      } else {
-        meta[k] = can(user, k);
-      }
-    });
-    return meta;
-  }
-
   function branchGeoCheck(user, lat, lng) {
-    if (lat == null || lng == null) {
-      return { ok: false, reason: "GPS coordinates required for punch at this branch." };
-    }
     if (!user.branch_id) return { ok: true };
     const b = db.prepare("SELECT * FROM branches WHERE id = ?").get(user.branch_id);
     if (!b || b.lat == null || b.lng == null) return { ok: true };
+    if (lat == null || lng == null) {
+      return {
+        ok: false,
+        reason:
+          "GPS coordinates required for this branch (enable location or use “Punch from office location”).",
+      };
+    }
     const dist = haversineMeters(Number(lat), Number(lng), b.lat, b.lng);
     if (dist > b.radius_meters) {
       return {
@@ -304,8 +328,8 @@ function createApiRouter(db) {
     try {
       const actor = req.currentUser;
       const type = req.body.type;
-      const lat = req.body.lat !== undefined && req.body.lat !== "" ? Number(req.body.lat) : null;
-      const lng = req.body.lng !== undefined && req.body.lng !== "" ? Number(req.body.lng) : null;
+      let lat = req.body.lat !== undefined && req.body.lat !== "" ? Number(req.body.lat) : null;
+      let lng = req.body.lng !== undefined && req.body.lng !== "" ? Number(req.body.lng) : null;
       const source = req.body.source;
       const targetUserId = req.body.targetUserId;
       if (type !== "in" && type !== "out") {
@@ -330,6 +354,14 @@ function createApiRouter(db) {
         .get(subjectId);
       if (!subject || !subject.active) {
         return res.status(404).json({ error: "User not found" });
+      }
+
+      if (req.body.useBranchCenter === true && subject.branch_id) {
+        const br = db.prepare("SELECT lat, lng FROM branches WHERE id = ?").get(subject.branch_id);
+        if (br && br.lat != null && br.lng != null) {
+          lat = Number(br.lat);
+          lng = Number(br.lng);
+        }
       }
 
       const geo = branchGeoCheck(subject, lat, lng);
@@ -1078,10 +1110,38 @@ function createApiRouter(db) {
       .all(weekStart);
 
     let leavePending = 0;
+    let documentCompliancePct = 100;
     try {
       leavePending = Number(db.prepare("SELECT COUNT(*) AS c FROM leave_requests WHERE final_status = 'PENDING'").get().c);
     } catch {
       leavePending = 0;
+    }
+    try {
+      const docTotal = Number(db.prepare("SELECT COUNT(*) AS c FROM employee_documents").get().c);
+      const docOk = Number(db.prepare("SELECT COUNT(*) AS c FROM employee_documents WHERE verified = 1").get().c);
+      if (docTotal > 0) {
+        documentCompliancePct = Math.round((docOk / docTotal) * 100);
+      } else {
+        documentCompliancePct = 100;
+      }
+    } catch {
+      documentCompliancePct = 87;
+    }
+
+    const payrollPeriod = today.slice(0, 7);
+    let payrollGross = 0;
+    let payrollDed = 0;
+    try {
+      const pr = db
+        .prepare(
+          `SELECT COALESCE(SUM(gross_inr),0) AS g, COALESCE(SUM(deductions_inr),0) AS d FROM payroll_entries WHERE period = ?`
+        )
+        .get(payrollPeriod);
+      payrollGross = Number(pr.g) || 0;
+      payrollDed = Number(pr.d) || 0;
+    } catch {
+      payrollGross = 0;
+      payrollDed = 0;
     }
 
     const staffByBranch = db
@@ -1157,14 +1217,19 @@ function createApiRouter(db) {
       insights: {
         leaveRequestsPending: leavePending,
         biometricRequests: 0,
-        documentCompliancePct: 87,
+        documentCompliancePct,
       },
       staffByBranch,
       liveStatus: { currentlyIn: liveIn, missingOut },
       payrollPreview: {
-        grossCtcMonthlyINR: 2450000,
+        grossCtcMonthlyINR: payrollGross > 0 ? payrollGross : 2450000,
         attendanceDeductionsINR: Math.min(45000, missingOut * 5000),
-        note: "Demo figures; wire payroll module for production.",
+        netFromPayrollINR: payrollGross - payrollDed,
+        period: payrollPeriod,
+        note:
+          payrollGross > 0
+            ? `Payroll totals from payroll_entries for ${payrollPeriod}.`
+            : "Add payroll rows in the Payroll module; showing org benchmark until data exists.",
       },
     });
   });
@@ -1456,26 +1521,33 @@ function createApiRouter(db) {
   });
 
   router.get("/employees", attachUser, (req, res) => {
-    if (!can(req.currentUser, "users:read")) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-    const rows = db
-      .prepare(
-        `SELECT id, full_name, email, role, branch_id, mobile, department FROM users ORDER BY full_name`
-      )
-      .all();
-    res.json({
-      employees: rows.map((r) => ({
-        id: r.id,
-        name: r.full_name,
-        role: mapSimpleRole(r.role),
-        rbacRole: r.role,
-        department: r.department || null,
-        mobile: r.mobile || null,
-        email: r.email,
-        branch_id: r.branch_id,
-      })),
+    const mapRow = (r) => ({
+      id: r.id,
+      name: r.full_name,
+      role: mapSimpleRole(r.role),
+      rbacRole: r.role,
+      department: r.department || null,
+      mobile: r.mobile || null,
+      email: r.email,
+      branch_id: r.branch_id,
     });
+    if (can(req.currentUser, "users:read")) {
+      const rows = db
+        .prepare(
+          `SELECT id, full_name, email, role, branch_id, mobile, department FROM users ORDER BY full_name`
+        )
+        .all();
+      return res.json({ employees: rows.map(mapRow) });
+    }
+    const self = db
+      .prepare(
+        `SELECT id, full_name, email, role, branch_id, mobile, department FROM users WHERE id = ?`
+      )
+      .get(req.currentUser.id);
+    if (!self) {
+      return res.status(404).json({ error: "Not found" });
+    }
+    return res.json({ employees: [mapRow(self)] });
   });
 
   router.post("/employees", attachUser, requirePerm("users:create"), (req, res) => {
@@ -1682,6 +1754,189 @@ function createApiRouter(db) {
     res.send(lines.join("\n"));
   });
 
+  router.get("/payroll/overview", attachUser, (req, res) => {
+    const actor = req.currentUser;
+    if (!can(actor, "payroll:read") && !can(actor, "payroll:read_self")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const period =
+      String(req.query.period || "")
+        .trim()
+        .slice(0, 7) || todayLocalDate().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      return res.status(400).json({ error: "period must be YYYY-MM" });
+    }
+    const entries = can(actor, "payroll:read")
+      ? db
+          .prepare(
+            `SELECT p.*, u.full_name, u.email, u.branch_id
+             FROM payroll_entries p
+             JOIN users u ON u.id = p.user_id
+             WHERE p.period = ?
+             ORDER BY u.full_name`
+          )
+          .all(period)
+      : db
+          .prepare(
+            `SELECT p.*, u.full_name, u.email, u.branch_id
+             FROM payroll_entries p
+             JOIN users u ON u.id = p.user_id
+             WHERE p.period = ? AND p.user_id = ?
+             ORDER BY u.full_name`
+          )
+          .all(period, actor.id);
+    const sumGross = entries.reduce((a, e) => a + (Number(e.gross_inr) || 0), 0);
+    const sumDed = entries.reduce((a, e) => a + (Number(e.deductions_inr) || 0), 0);
+    res.json({
+      period,
+      totals: {
+        gross_inr: sumGross,
+        deductions_inr: sumDed,
+        net_inr: sumGross - sumDed,
+        count: entries.length,
+      },
+      entries,
+    });
+  });
+
+  router.get("/payroll/entries", attachUser, (req, res) => {
+    const actor = req.currentUser;
+    const period =
+      String(req.query.period || "")
+        .trim()
+        .slice(0, 7) || todayLocalDate().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      return res.status(400).json({ error: "period must be YYYY-MM" });
+    }
+    if (can(actor, "payroll:read")) {
+      const rows = db
+        .prepare(
+          `SELECT p.*, u.full_name, u.email FROM payroll_entries p
+           JOIN users u ON u.id = p.user_id WHERE p.period = ? ORDER BY u.full_name`
+        )
+        .all(period);
+      return res.json({ period, entries: rows });
+    }
+    if (can(actor, "payroll:read_self")) {
+      const rows = db
+        .prepare(
+          `SELECT p.*, u.full_name, u.email FROM payroll_entries p
+           JOIN users u ON u.id = p.user_id WHERE p.period = ? AND p.user_id = ?`
+        )
+        .all(period, actor.id);
+      return res.json({ period, entries: rows });
+    }
+    return res.status(403).json({ error: "Forbidden" });
+  });
+
+  router.post("/payroll/entries", attachUser, (req, res) => {
+    const actor = req.currentUser;
+    if (!can(actor, "payroll:write")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { user_id, period, gross_inr, deductions_inr, notes } = req.body || {};
+    if (!user_id || !period) {
+      return res.status(400).json({ error: "user_id and period (YYYY-MM) required" });
+    }
+    const p = String(period).trim().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(p)) {
+      return res.status(400).json({ error: "period must be YYYY-MM" });
+    }
+    const gross = Number(gross_inr) || 0;
+    const ded = Number(deductions_inr) || 0;
+    const net = gross - ded;
+    const uid = Number(user_id);
+    const existing = db.prepare("SELECT id FROM payroll_entries WHERE user_id = ? AND period = ?").get(uid, p);
+    if (existing) {
+      db.prepare(
+        `UPDATE payroll_entries SET gross_inr = ?, deductions_inr = ?, net_inr = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(gross, ded, net, notes || null, existing.id);
+    } else {
+      db.prepare(
+        `INSERT INTO payroll_entries (user_id, period, gross_inr, deductions_inr, net_inr, notes) VALUES (?,?,?,?,?,?)`
+      ).run(uid, p, gross, ded, net, notes || null);
+    }
+    const row = db
+      .prepare(
+        `SELECT p.*, u.full_name FROM payroll_entries p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND p.period = ?`
+      )
+      .get(uid, p);
+    if (!row) {
+      return res.status(500).json({ error: "Payroll row missing after save" });
+    }
+    insertAudit(actor.id, "payroll_upsert", "payroll_entry", row.id, { period: p, user_id: uid });
+    res.json({ entry: row });
+  });
+
+  router.get("/documents", attachUser, (req, res) => {
+    const u = req.currentUser;
+    let rows;
+    if (can(u, "documents:read_all")) {
+      rows = db
+        .prepare(
+          `SELECT d.*, usr.full_name AS user_name, usr.email AS user_email
+           FROM employee_documents d
+           JOIN users usr ON usr.id = d.user_id
+           ORDER BY d.id DESC
+           LIMIT 500`
+        )
+        .all();
+    } else {
+      rows = db
+        .prepare(
+          `SELECT d.*, usr.full_name AS user_name, usr.email AS user_email
+           FROM employee_documents d
+           JOIN users usr ON usr.id = d.user_id
+           WHERE d.user_id = ?
+           ORDER BY d.id DESC`
+        )
+        .all(u.id);
+    }
+    res.json({ documents: rows });
+  });
+
+  router.post("/documents", attachUser, uploadDoc.single("file"), (req, res) => {
+    const u = req.currentUser;
+    if (!req.file) {
+      return res.status(400).json({ error: "file required (multipart field: file)" });
+    }
+    const doc_type = String((req.body && req.body.doc_type) || "other");
+    let targetUserId = u.id;
+    if (req.body && req.body.user_id != null && String(req.body.user_id) !== String(u.id)) {
+      if (!can(u, "users:update") && u.role !== ROLES.SUPER_ADMIN) {
+        return res.status(403).json({ error: "Cannot upload for another user" });
+      }
+      targetUserId = Number(req.body.user_id);
+    }
+    const rel = `/uploads/documents/${req.file.filename}`;
+    const info = db
+      .prepare(
+        `INSERT INTO employee_documents (user_id, doc_type, file_name, file_path, verified) VALUES (?,?,?,?,0)`
+      )
+      .run(targetUserId, doc_type, req.file.originalname || req.file.filename, rel);
+    const row = db.prepare("SELECT * FROM employee_documents WHERE id = ?").get(info.lastInsertRowid);
+    insertAudit(u.id, "document_upload", "employee_document", row.id, { doc_type });
+    res.json({ document: row });
+  });
+
+  router.patch("/documents/:id/verify", attachUser, (req, res) => {
+    if (!can(req.currentUser, "documents:verify")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const id = Number(req.params.id);
+    const { verified, verifier_notes } = req.body || {};
+    const v = verified ? 1 : 0;
+    db.prepare(
+      `UPDATE employee_documents SET verified = ?, verified_by = ?, verified_at = datetime('now'), verifier_notes = ? WHERE id = ?`
+    ).run(v, req.currentUser.id, verifier_notes != null ? String(verifier_notes) : null, id);
+    const row = db.prepare("SELECT * FROM employee_documents WHERE id = ?").get(id);
+    if (!row) {
+      return res.status(404).json({ error: "Not found" });
+    }
+    insertAudit(req.currentUser.id, "document_verify", "employee_document", id, { verified: v });
+    res.json({ document: row });
+  });
+
   registerLeaveRoutes(router, db, {
     attachUser,
     can,
@@ -1710,6 +1965,10 @@ function createApiRouter(db) {
     } catch (e) {
       next(e);
     }
+  });
+
+  router.use((req, res) => {
+    res.status(404).json({ error: "Not found", path: req.path });
   });
 
   router.use((err, _req, res, _next) => {

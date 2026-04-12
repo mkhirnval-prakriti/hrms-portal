@@ -3,7 +3,17 @@ import { Layout } from './components/Layout'
 import { LogoLoader } from './components/LogoLoader'
 import { Dashboard } from './pages/Dashboard'
 import { Login } from './pages/Login'
-import { Placeholder } from './pages/Placeholder'
+import { AttendancePage } from './pages/AttendancePage'
+import { EmployeesPage } from './pages/EmployeesPage'
+import { LeavesPage } from './pages/LeavesPage'
+import { PayrollPage } from './pages/PayrollPage'
+import { DocumentsPage } from './pages/DocumentsPage'
+import { NoticesPage } from './pages/NoticesPage'
+import { OfficePage } from './pages/OfficePage'
+import { CompanyPage } from './pages/CompanyPage'
+import { GuidePage } from './pages/GuidePage'
+import { KioskPage } from './pages/KioskPage'
+import { TrashPage } from './pages/TrashPage'
 import { useAuth } from './context/AuthContext'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -32,21 +42,18 @@ export default function App() {
           }
         >
           <Route index element={<Dashboard />} />
-          <Route path="attendance" element={<Placeholder title="Attendance" />} />
-          <Route path="employees" element={<Placeholder title="Employees" />} />
-          <Route
-            path="documents"
-            element={<Placeholder title="Document Verification" hint="KYC / ID checks — connect OCR pipeline later." />}
-          />
-          <Route path="leaves" element={<Placeholder title="Leaves" />} />
-          <Route path="payroll" element={<Placeholder title="Payroll" />} />
-          <Route path="staff-mgmt" element={<Placeholder title="Staff Management" />} />
-          <Route path="kiosk" element={<Placeholder title="Kiosk Mode" />} />
-          <Route path="trash" element={<Placeholder title="Trash" />} />
-          <Route path="office" element={<Placeholder title="Office Location" />} />
-          <Route path="company" element={<Placeholder title="Company" />} />
-          <Route path="notices" element={<Placeholder title="Notice Board" />} />
-          <Route path="guide" element={<Placeholder title="System Guide" />} />
+          <Route path="attendance" element={<AttendancePage />} />
+          <Route path="employees" element={<EmployeesPage />} />
+          <Route path="documents" element={<DocumentsPage />} />
+          <Route path="leaves" element={<LeavesPage />} />
+          <Route path="payroll" element={<PayrollPage />} />
+          <Route path="staff-mgmt" element={<Navigate to="/employees" replace />} />
+          <Route path="kiosk" element={<KioskPage />} />
+          <Route path="trash" element={<TrashPage />} />
+          <Route path="office" element={<OfficePage />} />
+          <Route path="company" element={<CompanyPage />} />
+          <Route path="notices" element={<NoticesPage />} />
+          <Route path="guide" element={<GuidePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

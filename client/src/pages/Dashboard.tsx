@@ -32,6 +32,8 @@ type Overview = {
   payrollPreview?: {
     grossCtcMonthlyINR: number
     attendanceDeductionsINR: number
+    netFromPayrollINR?: number
+    period?: string
     note: string
   }
 }

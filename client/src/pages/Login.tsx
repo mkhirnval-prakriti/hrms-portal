@@ -12,6 +12,7 @@ type LoginResponse = {
   full_name: string
   role: string
   branch_id?: number | null
+  permissions?: Record<string, boolean>
 }
 
 export function Login() {

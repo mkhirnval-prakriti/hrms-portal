@@ -9,6 +9,7 @@ const app = express();
 app.set("trust proxy", 1);
 
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 
 const db = openDb();
 const apiRouter = createApiRouter(db);
@@ -99,12 +100,12 @@ app.get(/^\/app\/?$/, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "app", "index.html"));
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log("Server Running");
   console.log(
     process.env.RENDER
-      ? `Listening on port ${PORT} (Render)`
-      : `http://localhost:${PORT}`
+      ? `Listening on ${HOST}:${PORT} (Render)`
+      : `http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`
   );
   setImmediate(() => {
     runStartupSmokeTest(db).catch((e) => console.error("[appsScriptSync] startup test", e.message));

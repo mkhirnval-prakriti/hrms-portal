@@ -139,6 +139,39 @@ function migrate(db) {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      doc_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      verified INTEGER NOT NULL DEFAULT 0,
+      verified_by INTEGER,
+      verified_at TEXT,
+      verifier_notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (verified_by) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_employee_documents_user ON employee_documents(user_id);
+
+    CREATE TABLE IF NOT EXISTS payroll_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      period TEXT NOT NULL,
+      gross_inr REAL NOT NULL DEFAULT 0,
+      deductions_inr REAL NOT NULL DEFAULT 0,
+      net_inr REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, period),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_payroll_entries_period ON payroll_entries(period);
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS integration_kv (
       k TEXT PRIMARY KEY,
       v TEXT NOT NULL

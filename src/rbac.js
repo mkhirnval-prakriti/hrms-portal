@@ -31,6 +31,10 @@ const ROLE_MATRIX = {
     "roles:read",
     "settings:read",
     "settings:write",
+    "payroll:read",
+    "payroll:write",
+    "documents:read_all",
+    "documents:verify",
   ],
   [ROLES.LOCATION_MANAGER]: [
     "dashboard:read",
@@ -57,6 +61,10 @@ const ROLE_MATRIX = {
     "timings:write",
     "roles:read",
     "settings:read",
+    "payroll:read",
+    "payroll:write",
+    "documents:read_all",
+    "documents:verify",
   ],
   [ROLES.USER]: [
     "dashboard:read_self",
@@ -70,6 +78,7 @@ const ROLE_MATRIX = {
     "export:read",
     "notices:read",
     "timings:read_self",
+    "payroll:read_self",
   ],
 };
 

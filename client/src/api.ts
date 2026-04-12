@@ -22,7 +22,7 @@ export async function api<T = unknown>(
   options: RequestInit = {}
 ): Promise<T> {
   const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData
-  const token = !isForm ? getToken() : null
+  const token = getToken()
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   }
