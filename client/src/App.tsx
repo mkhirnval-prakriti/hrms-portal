@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from './components/Layout'
+import { LogoLoader } from './components/LogoLoader'
 import { Dashboard } from './pages/Dashboard'
 import { Login } from './pages/Login'
 import { Placeholder } from './pages/Placeholder'
@@ -16,11 +17,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   }, [])
 
   if (state === 'loading') {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f0f4f1] text-emerald-800">
-        Loading…
-      </div>
-    )
+    return <LogoLoader />
   }
   if (state === 'out') {
     return <Navigate to="/login" replace />
@@ -57,8 +54,8 @@ export default function App() {
           <Route path="company" element={<Placeholder title="Company" />} />
           <Route path="notices" element={<Placeholder title="Notice Board" />} />
           <Route path="guide" element={<Placeholder title="System Guide" />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
   )

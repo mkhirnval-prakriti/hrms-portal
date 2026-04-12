@@ -2,11 +2,11 @@
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --color-ph-green: #1b5e20;
+  --color-ph-brand: #1f5e3b;
   --color-ph-green-mid: #2e7d32;
   --color-ph-green-light: #66bb6a;
   --color-ph-mint: #a5d6a7;
-  --color-ph-bg: #f0f4f1;
+  --color-ph-bg: #f5f7f6;
   --color-ph-card: #ffffff;
   --color-ph-brown: #8d6e63;
 }
@@ -20,14 +20,64 @@ body,
 body {
   margin: 0;
   font-family: var(--font-sans);
-  background: var(--color-ph-bg);
-  color: #1a2e1c;
+  background: linear-gradient(165deg, #f8faf9 0%, #eef4f0 45%, #f5f7f6 100%);
+  color: #14261a;
 }
 
-.ph-gradient {
-  background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 45%, #388e3c 100%);
+/* Premium sidebar / header gradient */
+.ph-brand-gradient {
+  background: linear-gradient(160deg, #1f5e3b 0%, #2a6b45 38%, #1a4d30 100%);
+}
+
+.ph-glass {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .ph-card {
-  @apply rounded-xl border border-emerald-100/80 bg-white shadow-[0_8px_30px_rgba(27,94,32,0.08)] transition hover:shadow-[0_12px_36px_rgba(27,94,32,0.12)];
+  @apply rounded-2xl border border-white/60 bg-white/90 shadow-[0_10px_40px_rgba(31,94,59,0.09)] transition duration-200;
+}
+
+.ph-card:hover {
+  box-shadow: 0 16px 48px rgba(31, 94, 59, 0.12);
+}
+
+.ph-stat-tall {
+  @apply overflow-hidden rounded-2xl shadow-[0_12px_40px_rgba(31,94,59,0.15)] transition duration-300;
+}
+
+.ph-stat-tall:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 50px rgba(31, 94, 59, 0.18);
+}
+
+/* Logo loader — orbit ring (premium, no text) */
+@keyframes ph-orbit {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ph-pulse-logo {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.92;
+    transform: scale(0.98);
+  }
+}
+
+.ph-loader-orbit {
+  animation: ph-orbit 2.2s linear infinite;
+}
+
+.ph-loader-logo {
+  animation: ph-pulse-logo 2s ease-in-out infinite;
 }
