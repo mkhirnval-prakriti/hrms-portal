@@ -7,6 +7,8 @@ const items: { to: string; label: string; Icon: FC<{ className?: string }> }[] =
   { to: '/', label: 'Dashboard', Icon: IconHome },
   { to: '/reports', label: 'Reports', Icon: IconChart },
   { to: '/attendance', label: 'Attendance', Icon: IconClock },
+  { to: '/identity', label: 'Identity', Icon: IconId },
+  { to: '/biometric-requests', label: 'Biometrics', Icon: IconIdAdmin },
   { to: '/crm', label: 'CRM Leads', Icon: IconBriefcase },
   { to: '/employees', label: 'Employees', Icon: IconUsers },
   { to: '/documents', label: 'Doc Verification', Icon: IconDoc },
@@ -41,6 +43,8 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     if (!user) return false
     if (it.to === '/employees' || it.to === '/staff-mgmt') return canPerm(user, 'users:read')
     if (it.to === '/attendance' || it.to === '/kiosk') return canPerm(user, 'attendance:punch')
+    if (it.to === '/identity') return canPerm(user, 'attendance:punch')
+    if (it.to === '/biometric-requests') return canPerm(user, 'biometric:admin')
     if (it.to === '/documents') return canPerm(user, 'documents:read_all')
     if (it.to === '/leaves') return canPerm(user, 'leave:read_all') || canPerm(user, 'leave:read_self')
     if (it.to === '/payroll') return canPerm(user, 'payroll:read') || canPerm(user, 'payroll:read_self')
@@ -127,6 +131,20 @@ function IconClock({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  )
+}
+function IconId({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2" />
+    </svg>
+  )
+}
+function IconIdAdmin({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
     </svg>
   )
 }

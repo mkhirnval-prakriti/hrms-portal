@@ -3,6 +3,15 @@ import { api, apiFetchUrl, getToken } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
 import { localDateStr } from '../lib/date'
+import { Link } from 'react-router-dom'
+import { captureVideoFrameToJpegBlob, getFaceCameraConstraints } from '../lib/faceCapture'
+import { descriptorToJson, runLivenessAndFaceDescriptor } from '../lib/faceApiLiveness'
+import {
+  browserSupportsWebAuthn,
+  createAttendanceWebAuthnPayload,
+  fetchWebAuthnAttendanceStatus,
+  type WebAuthnAttendanceStatus,
+} from '../lib/webauthnAttendance'
 
 type AttRow = {
   id: number
@@ -43,10 +52,74 @@ export function AttendancePage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [camOn, setCamOn] = useState(false)
   const [faceBlob, setFaceBlob] = useState<Blob | null>(null)
+  const [faceDescriptorJson, setFaceDescriptorJson] = useState<string | null>(null)
+  const [bioHint, setBioHint] = useState<{
+    hasFace: boolean
+    webauthnCount: number
+    faceEmbeddingActive?: boolean
+  } | null>(null)
 
   const today = localDateStr()
   const canAll = canPerm(user, 'history:read')
   const [geoWarned, setGeoWarned] = useState(false)
+
+  const waStatusRef = useRef<WebAuthnAttendanceStatus | null>(null)
+  const [waStatus, setWaStatus] = useState<WebAuthnAttendanceStatus | null>(null)
+  const refreshWaStatus = useCallback(async () => {
+    try {
+      const s = await fetchWebAuthnAttendanceStatus()
+      waStatusRef.current = s
+      setWaStatus(s)
+      return s
+    } catch {
+      const fallback: WebAuthnAttendanceStatus = {
+        mode: 'off',
+        credCount: 0,
+        punchRequiresWebAuthn: false,
+        rpId: '',
+      }
+      waStatusRef.current = fallback
+      setWaStatus(fallback)
+      return fallback
+    }
+  }, [])
+
+  const refreshIdentityHint = useCallback(async () => {
+    try {
+      const b = await api<{ hasFace: boolean; webauthnCount: number; faceEmbeddingActive?: boolean }>(
+        '/biometric/status'
+      )
+      setBioHint({
+        hasFace: !!b.hasFace,
+        webauthnCount: Number(b.webauthnCount || 0),
+        faceEmbeddingActive: !!b.faceEmbeddingActive,
+      })
+    } catch {
+      setBioHint(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!user) return
+    void (async () => {
+      await refreshWaStatus()
+      await refreshIdentityHint()
+    })()
+  }, [user, refreshWaStatus, refreshIdentityHint])
+
+  async function attachWebAuthnIfNeeded(bodyOrAppend: Record<string, unknown> | FormData) {
+    const s = waStatusRef.current ?? (await refreshWaStatus())
+    if (!s.punchRequiresWebAuthn) return
+    if (!browserSupportsWebAuthn()) {
+      throw new Error('This browser does not support passkeys (WebAuthn).')
+    }
+    const payload = await createAttendanceWebAuthnPayload()
+    if (bodyOrAppend instanceof FormData) {
+      bodyOrAppend.append('webAuthn', JSON.stringify(payload))
+    } else {
+      bodyOrAppend.webAuthn = payload
+    }
+  }
 
   function speak(text: string) {
     if (!('speechSynthesis' in window)) return
@@ -65,6 +138,7 @@ export function AttendancePage() {
       setRecords(data.records || [])
       const w = await api<{ warnings: WarnRow[] }>('/warnings/me')
       setWarnings(w.warnings || [])
+      await refreshIdentityHint()
     } catch (e) {
       setErr((e as Error).message)
       setRecords([])
@@ -72,7 +146,7 @@ export function AttendancePage() {
     } finally {
       setLoading(false)
     }
-  }, [from, to])
+  }, [from, to, refreshIdentityHint])
 
   useEffect(() => {
     load()
@@ -132,7 +206,9 @@ export function AttendancePage() {
         body.useBranchCenter = true
         body.verificationStatus = 'pending'
       }
+      await attachWebAuthnIfNeeded(body)
       await api(path, { method: 'POST', body: JSON.stringify(body) })
+      void refreshWaStatus()
       setPunchMsg(kind === 'in' ? 'Checked in successfully.' : 'Checked out successfully.')
       if (kind === 'in') speak('Welcome to Prakriti Herbs, aapki attendance lag gayi hai')
       if (kind === 'out') speak('Prakriti Herbs mein aaj ki attendance dene ke liye dhanyavaad')
@@ -147,12 +223,50 @@ export function AttendancePage() {
   async function startCamera() {
     setErr(null)
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
+      const stream = await navigator.mediaDevices.getUserMedia(getFaceCameraConstraints())
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
       }
       setCamOn(true)
+    } catch {
+      setErr('Camera access denied or unavailable.')
+    }
+  }
+
+  /** Opens camera, grabs one scaled frame, closes — fewer taps for attendance. */
+  async function quickFaceCapture() {
+    if (bioHint?.faceEmbeddingActive) {
+      setPunchMsg('AI face profile is on — use Open camera, then Live verify & capture (blink + small head move).')
+      return
+    }
+    setErr(null)
+    setPunchMsg(null)
+    const v = videoRef.current
+    const c = canvasRef.current
+    if (!v || !c) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(getFaceCameraConstraints())
+      v.srcObject = stream
+      await v.play()
+      await new Promise<void>((res) => {
+        if (v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) res()
+        else v.onloadeddata = () => res()
+      })
+      await new Promise<void>((res) => requestAnimationFrame(() => requestAnimationFrame(() => res())))
+      const blob = await captureVideoFrameToJpegBlob(v, c)
+      stream.getTracks().forEach((t) => t.stop())
+      v.srcObject = null
+      setCamOn(false)
+      if (blob && blob.size >= 8192) {
+        setFaceDescriptorJson(null)
+        setFaceBlob(blob)
+        if (previewUrl) URL.revokeObjectURL(previewUrl)
+        setPreviewUrl(URL.createObjectURL(blob))
+        setPunchMsg('Photo captured — tap Check in (face) or Check out (face).')
+      } else {
+        setPunchMsg('Photo too small — try brighter light or use Open camera, then Capture.')
+      }
     } catch {
       setErr('Camera access denied or unavailable.')
     }
@@ -165,33 +279,61 @@ export function AttendancePage() {
       v.srcObject = null
     }
     setCamOn(false)
+    setFaceDescriptorJson(null)
   }
 
-  function capturePreview() {
+  async function liveVerifyAndCapture() {
+    const v = videoRef.current
+    const c = canvasRef.current
+    if (!v || !c || !v.videoWidth) {
+      setPunchMsg('Open the camera first.')
+      return
+    }
+    setPunchMsg(null)
+    setBusy(true)
+    try {
+      const desc = await runLivenessAndFaceDescriptor(v)
+      setFaceDescriptorJson(descriptorToJson(desc))
+      const blob = await captureVideoFrameToJpegBlob(v, c)
+      if (blob && blob.size >= 8192) {
+        setFaceBlob(blob)
+        if (previewUrl) URL.revokeObjectURL(previewUrl)
+        setPreviewUrl(URL.createObjectURL(blob))
+        setPunchMsg('Live check passed — tap Check in (face) or Check out (face).')
+      } else {
+        setFaceDescriptorJson(null)
+        setPunchMsg('Photo too small after live check — adjust light and retry.')
+      }
+    } catch (e) {
+      setFaceDescriptorJson(null)
+      setPunchMsg((e as Error).message || 'Live check failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function capturePreview() {
     const v = videoRef.current
     const c = canvasRef.current
     if (!v || !c || !v.videoWidth) return
-    c.width = v.videoWidth
-    c.height = v.videoHeight
-    const ctx = c.getContext('2d')
-    if (!ctx) return
-    ctx.drawImage(v, 0, 0)
-    c.toBlob(
-      (b) => {
-        if (b) {
-          setFaceBlob(b)
-          if (previewUrl) URL.revokeObjectURL(previewUrl)
-          setPreviewUrl(URL.createObjectURL(b))
-        }
-      },
-      'image/jpeg',
-      0.88
-    )
+    const blob = await captureVideoFrameToJpegBlob(v, c)
+    if (blob) {
+      if (bioHint?.faceEmbeddingActive) {
+        setFaceDescriptorJson(null)
+      }
+      setFaceBlob(blob)
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+      setPreviewUrl(URL.createObjectURL(blob))
+    }
   }
 
   async function punchFace(kind: 'in' | 'out') {
     if (!faceBlob || faceBlob.size < 8192) {
       setPunchMsg('Capture a clearer photo (min ~8KB) using Face scan.')
+      return
+    }
+    if (bioHint?.faceEmbeddingActive && !faceDescriptorJson) {
+      setPunchMsg('Live face check required — use Live verify & capture before punching.')
       return
     }
     setPunchMsg(null)
@@ -205,6 +347,8 @@ export function AttendancePage() {
       if (wifiSsid.trim()) fd.append('wifi_ssid', wifiSsid.trim())
       if (user?.branch_id) fd.append('useBranchCenter', 'true')
       fd.append('photo', faceBlob, 'face.jpg')
+      if (faceDescriptorJson) fd.append('faceDescriptor', faceDescriptorJson)
+      await attachWebAuthnIfNeeded(fd)
       const token = getToken()
       const res = await fetch(apiFetchUrl(path), {
         method: 'POST',
@@ -215,10 +359,12 @@ export function AttendancePage() {
       const text = await res.text()
       const data = text ? JSON.parse(text) : null
       if (!res.ok) throw new Error(data?.error || res.statusText)
+      void refreshWaStatus()
       setPunchMsg(kind === 'in' ? 'Checked in with face.' : 'Checked out with face.')
       if (kind === 'in') speak('Welcome to Prakriti Herbs, aapki attendance lag gayi hai')
       if (kind === 'out') speak('Prakriti Herbs mein aaj ki attendance dene ke liye dhanyavaad')
       setFaceBlob(null)
+      setFaceDescriptorJson(null)
       if (previewUrl) URL.revokeObjectURL(previewUrl)
       setPreviewUrl(null)
       stopCamera()
@@ -281,8 +427,9 @@ export function AttendancePage() {
       <div>
         <h1 className="text-2xl font-bold text-[#1f5e3b]">Attendance</h1>
         <p className="text-sm text-[#1f5e3b]/70">
-          Choose GPS, office location, face capture, or fingerprint (device-ready). Photo history appears in the
-          table below.
+          Choose GPS, office location, face capture, or fingerprint (device-ready). When your organization enables
+          passkeys, you verify with your device PIN or biometrics before each punch. Photo history appears in the table
+          below.
         </p>
       </div>
       {warnings.length > 0 && (
@@ -295,6 +442,29 @@ export function AttendancePage() {
           </ul>
         </div>
       )}
+
+      <div className="ph-card rounded-2xl border border-[#1f5e3b]/10 p-4">
+        <p className="text-sm text-[#14261a]">
+          <span className="font-semibold text-[#1f5e3b]">Identity & biometrics</span> — first-time face and passkey setup,
+          and any updates after manager approval, live on the Identity page (keeps attendance here fast).{' '}
+          <Link to="/identity" className="font-semibold text-[#2e7d32] underline">
+            Open Identity
+          </Link>
+        </p>
+        {waStatus?.punchRequiresWebAuthn && (
+          <p className="mt-2 text-xs text-[#1f5e3b]/80">
+            Punches use WebAuthn when your org enables it. RP ID: <span className="font-mono">{waStatus.rpId || '—'}</span>
+          </p>
+        )}
+        {waStatus?.mode === 'required' && waStatus.credCount === 0 && (
+          <p className="mt-2 text-sm font-medium text-red-700">
+            A passkey is required before punching — register it under Identity.
+          </p>
+        )}
+        {!browserSupportsWebAuthn() && waStatus?.punchRequiresWebAuthn && (
+          <p className="mt-1 text-xs font-medium text-amber-900">This browser does not support passkeys.</p>
+        )}
+      </div>
 
       <div className="ph-card rounded-2xl p-6">
         <h2 className="text-lg font-semibold text-[#1f5e3b]">Today · {today}</h2>
@@ -373,24 +543,71 @@ export function AttendancePage() {
 
         <div className="mt-6 border-t border-[#1f5e3b]/10 pt-4">
           <h3 className="text-sm font-semibold text-[#1f5e3b]">Face scan</h3>
-          <p className="mt-1 text-xs text-[#1f5e3b]/65">Open camera, capture preview, then check in/out with photo.</p>
+          <p className="mt-1 text-xs text-[#1f5e3b]/65">
+            {bioHint?.faceEmbeddingActive
+              ? 'AI face mode: open the camera, run live verify (blink + small head move), then punch. Photos are still resized for upload.'
+              : 'Quick capture grabs one photo and closes the camera (fastest). Or open the camera and capture manually. Images are resized before upload for speed.'}
+          </p>
+          {bioHint && !bioHint.hasFace && (
+            <p className="mt-2 text-xs text-amber-900">
+              One-time face enrollment is on the{' '}
+              <Link to="/identity" className="font-semibold underline">
+                Identity
+              </Link>{' '}
+              page — this section is for daily attendance photos only.
+            </p>
+          )}
+          {bioHint && bioHint.hasFace && (
+            <p className="mt-2 text-xs text-[#1f5e3b]/75">
+              Reference face is enrolled — capture here matches against it on the server (no re-enrollment from this
+              screen).
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap items-start gap-4">
             <div className="space-y-2">
               {!camOn ? (
-                <button
-                  type="button"
-                  onClick={startCamera}
-                  className="rounded-xl bg-[#1f5e3b] px-4 py-2 text-sm font-semibold text-white"
-                >
-                  Open camera
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  {!bioHint?.faceEmbeddingActive && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => quickFaceCapture()}
+                      className="rounded-xl bg-gradient-to-r from-[#1f5e3b] to-[#2e7d32] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                    >
+                      Quick capture
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={startCamera}
+                    className="rounded-xl border border-[#1f5e3b]/25 bg-white px-4 py-2 text-sm font-semibold text-[#1f5e3b] disabled:opacity-50"
+                  >
+                    Open camera
+                  </button>
+                </div>
               ) : (
                 <>
                   <video ref={videoRef} playsInline muted className="max-h-48 rounded-xl border border-[#1f5e3b]/20" />
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={capturePreview} className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white">
-                      Capture preview
-                    </button>
+                    {bioHint?.faceEmbeddingActive ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => liveVerifyAndCapture()}
+                        className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                      >
+                        Live verify & capture
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={capturePreview}
+                        className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white"
+                      >
+                        Capture preview
+                      </button>
+                    )}
                     <button type="button" onClick={stopCamera} className="rounded-lg border border-[#1f5e3b]/20 px-3 py-1.5 text-xs text-[#1f5e3b]">
                       Close camera
                     </button>

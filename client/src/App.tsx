@@ -21,6 +21,12 @@ const KioskPage = lazy(() => import('./pages/KioskPage').then((m) => ({ default:
 const TrashPage = lazy(() => import('./pages/TrashPage').then((m) => ({ default: m.TrashPage })))
 const CrmPage = lazy(() => import('./pages/CrmPage').then((m) => ({ default: m.CrmPage })))
 const ReportsPage = lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })))
+const IdentityEnrollmentPage = lazy(() =>
+  import('./pages/IdentityEnrollmentPage').then((m) => ({ default: m.IdentityEnrollmentPage }))
+)
+const BiometricAdminPage = lazy(() =>
+  import('./pages/BiometricAdminPage').then((m) => ({ default: m.BiometricAdminPage }))
+)
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, initializing } = useAuth()
@@ -61,6 +67,22 @@ export default function App() {
             element={
               <Suspense fallback={<PageSkeleton rows={6} />}>
                 <AttendancePage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="identity"
+            element={
+              <Suspense fallback={<PageSkeleton rows={5} />}>
+                <IdentityEnrollmentPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="biometric-requests"
+            element={
+              <Suspense fallback={<PageSkeleton rows={5} />}>
+                <BiometricAdminPage />
               </Suspense>
             }
           />

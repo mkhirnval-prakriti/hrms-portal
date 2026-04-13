@@ -262,6 +262,7 @@ function migrate(db) {
   tryAddColumn(db, "employee_documents", "account_number TEXT");
   tryAddColumn(db, "employee_documents", "ifsc TEXT");
   tryAddColumn(db, "employee_documents", "bank_name TEXT");
+  tryAddColumn(db, "user_face_profiles", "embedding_json TEXT");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS departments (
@@ -441,6 +442,44 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      credential_id TEXT NOT NULL UNIQUE,
+      public_key_b64 TEXT NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      transports TEXT,
+      device_label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS biometric_update_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      requester_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      notes TEXT,
+      reject_reason TEXT,
+      resolved_at TEXT,
+      resolved_by_id INTEGER,
+      approval_expires_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (requester_id) REFERENCES users(id),
+      FOREIGN KEY (resolved_by_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bio_req_user_kind_status ON biometric_update_requests(user_id, kind, status);
+    CREATE INDEX IF NOT EXISTS idx_bio_req_status_created ON biometric_update_requests(status, created_at);
   `);
 
   tryAddColumn(db, "users", "base_salary_inr REAL NOT NULL DEFAULT 12000");

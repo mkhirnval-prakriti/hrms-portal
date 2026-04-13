@@ -11,9 +11,11 @@ const {
   buildMonthlyAttendanceXlsxBuffer,
 } = require("./productReports");
 const { notifyDailySummaryWhatsApp } = require("./whatsapp");
+const { assertFaceEnrollmentAllowed, markApprovalRequestCompleted } = require("./biometricPolicy");
+const { parseEmbeddingPayload, serializeEmbedding, EMBEDDING_DIM } = require("./faceEmbedding");
 
 function registerProductRoutes(router, ctx) {
-  const { db, attachUser, can, ROLES, uploadFace } = ctx;
+  const { db, attachUser, can, ROLES, uploadFace, insertAudit } = ctx;
   const todayLocalDate =
     typeof ctx.todayLocalDate === "function" ? ctx.todayLocalDate : () => new Date().toISOString().slice(0, 10);
 
@@ -277,9 +279,19 @@ function registerProductRoutes(router, ctx) {
 
   router.post("/users/:id/face-enrollment", attachUser, uploadFace.single("photo"), (req, res) => {
     const id = Number(req.params.id);
-    if (req.currentUser.id !== id && req.currentUser.role !== ROLES.SUPER_ADMIN) {
-      return res.status(403).json({ error: "Forbidden" });
+    const approvalRaw = req.body?.approvalRequestId ?? req.body?.approval_request_id;
+    const approvalRequestId = approvalRaw != null && String(approvalRaw).trim() !== "" ? Number(approvalRaw) : null;
+
+    const gate = assertFaceEnrollmentAllowed({
+      db,
+      actor: req.currentUser,
+      subjectId: id,
+      approvalRequestId: Number.isFinite(approvalRequestId) ? approvalRequestId : null,
+    });
+    if (!gate.ok) {
+      return res.status(gate.status).json({ error: gate.error });
     }
+
     if (!req.file) return res.status(400).json({ error: "photo file required (multipart field: photo)" });
     if (req.file.size < 8192) {
       return res.status(400).json({ error: "Photo too small — use live camera capture (min 8KB)" });
@@ -290,12 +302,42 @@ function registerProductRoutes(router, ctx) {
     } catch (e) {
       return res.status(400).json({ error: "Invalid image: " + e.message });
     }
+    const rawDesc = req.body?.faceDescriptor ?? req.body?.face_descriptor;
+    const descParsed =
+      typeof rawDesc === "string" ? parseEmbeddingPayload(rawDesc) : parseEmbeddingPayload(rawDesc);
+    let embeddingJson = null;
+    if (rawDesc != null && String(rawDesc).trim() !== "") {
+      const ser = serializeEmbedding(descParsed);
+      if (!ser) {
+        return res.status(400).json({ error: `faceDescriptor must be a JSON array of ${EMBEDDING_DIM} numbers` });
+      }
+      embeddingJson = ser;
+    }
+
+    const old = db
+      .prepare("SELECT phash, reference_path, embedding_json FROM user_face_profiles WHERE user_id = ?")
+      .get(id);
     const rel = `/uploads/faces/${req.file.filename}`;
     db.prepare(
-      `INSERT OR REPLACE INTO user_face_profiles (user_id, phash, reference_path, updated_at)
-       VALUES (?,?,?,datetime('now'))`
-    ).run(id, phash, rel);
-    res.json({ ok: true, phash, reference_path: rel });
+      `INSERT OR REPLACE INTO user_face_profiles (user_id, phash, reference_path, embedding_json, updated_at)
+       VALUES (?,?,?,?,datetime('now'))`
+    ).run(id, phash, rel, embeddingJson);
+
+    if (typeof insertAudit === "function") {
+      insertAudit(req.currentUser.id, "biometric_face_enroll", "user_face_profiles", String(id), {
+        mode: gate.mode,
+        subject_user_id: id,
+        old_reference_path: old?.reference_path || null,
+        new_reference_path: rel,
+        old_phash_prefix: old?.phash ? String(old.phash).slice(0, 16) : null,
+        new_phash_prefix: String(phash).slice(0, 16),
+        embedding_saved: !!embeddingJson,
+      });
+    }
+    if (gate.mode === "approval_self" && gate.approvalRow) {
+      markApprovalRequestCompleted(db, gate.approvalRow.id);
+    }
+    res.json({ ok: true, phash, reference_path: rel, mode: gate.mode });
   });
 }
 

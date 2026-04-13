@@ -36,7 +36,10 @@ const {
 const { registerLeaveRoutes } = require("./leaveRoutes");
 const { registerEnterpriseRoutes } = require("./enterpriseRoutes");
 const { registerProductRoutes } = require("./productRoutes");
+const { registerWebAuthnRoutes, verifyWebAuthnForAttendancePunch } = require("./webauthnAttendance");
+const { registerBiometricRoutes } = require("./biometricRoutes");
 const { phashFromBuffer, hammingHex } = require("./faceHash");
+const { matchEmbedding, parseEmbeddingPayload } = require("./faceEmbedding");
 const { notifyPunchWhatsApp } = require("./whatsapp");
 const { createHrAlert, listRecentAlerts, generateOtp } = require("./alertsService");
 const { sendMail, sendAlertEmailToAdmins } = require("./emailService");
@@ -504,6 +507,8 @@ function createApiRouter(db) {
       "audit:read",
       "crm:read",
       "crm:write",
+      "biometric:admin",
+      "biometric:request_update",
     ];
     keys.forEach((k) => {
       meta[k] = can(user, k);
@@ -876,14 +881,48 @@ function createApiRouter(db) {
         return res.status(400).json({ error: geo.reason });
       }
 
+      /** Overlap network I/O with WebAuthn user gesture / verification (saves ~0.5–3s typical). */
+      const addressPromise = reverseGeocode(lat, lng, { timeoutMs: 3500 });
+
+      const webAuthnGate = await verifyWebAuthnForAttendancePunch({
+        db,
+        req,
+        subjectId,
+        actorId: actor.id,
+      });
+      if (!webAuthnGate.ok) {
+        return res.status(webAuthnGate.status).json({
+          error: webAuthnGate.error,
+          code: webAuthnGate.code,
+        });
+      }
+
       if (req.file && req.file.size < 8192) {
         return res.status(400).json({ error: "Photo file too small — use a live camera capture (min 8KB)" });
       }
 
       let faceVerificationLabel = "none";
       if (req.file) {
-        const prof = db.prepare("SELECT phash FROM user_face_profiles WHERE user_id = ?").get(subjectId);
-        if (prof && prof.phash) {
+        const prof = db
+          .prepare("SELECT phash, embedding_json FROM user_face_profiles WHERE user_id = ?")
+          .get(subjectId);
+        const candEmb = parseEmbeddingPayload(req.body?.faceDescriptor);
+        if (prof && prof.embedding_json && String(prof.embedding_json).trim().length > 10) {
+          if (!candEmb) {
+            return res.status(400).json({
+              error:
+                "Live face verification required: use the in-app camera flow (blink + movement) so a face descriptor is sent with the photo.",
+            });
+          }
+          const embMatch = matchEmbedding(prof.embedding_json, candEmb);
+          if (!embMatch.ok) {
+            return res.status(400).json({
+              error: "Face does not match enrolled embedding — try again with clearer lighting.",
+              code: "FACE_EMBEDDING_MISMATCH",
+            });
+          }
+          faceVerificationLabel = "face_embedding_matched";
+        } else if (prof && prof.phash) {
           try {
             const buf = fs.readFileSync(req.file.path);
             const newHash = phashFromBuffer(buf);
@@ -902,7 +941,7 @@ function createApiRouter(db) {
         }
       }
 
-      const address = await reverseGeocode(lat, lng);
+      const address = await addressPromise;
       const photoPath = req.file ? `/uploads/attendance/${req.file.filename}` : null;
       const devInfo = devicePayload(req);
       const devShort = String(devInfo).slice(0, 4000);
@@ -1035,6 +1074,20 @@ function createApiRouter(db) {
     if (b.lat !== undefined && b.lat !== "") b.lat = Number(b.lat);
     if (b.lng !== undefined && b.lng !== "") b.lng = Number(b.lng);
     if (b.useBranchCenter === "true" || b.useBranchCenter === "1") b.useBranchCenter = true;
+    if (typeof b.webAuthn === "string" && b.webAuthn.trim()) {
+      try {
+        b.webAuthn = JSON.parse(b.webAuthn);
+      } catch {
+        /* keep string; verify layer will reject */
+      }
+    }
+    if (typeof b.faceDescriptor === "string" && b.faceDescriptor.trim()) {
+      try {
+        b.faceDescriptor = JSON.parse(b.faceDescriptor);
+      } catch {
+        /* invalid JSON; match layer rejects */
+      }
+    }
     req.body = b;
   }
 
@@ -3731,6 +3784,9 @@ function createApiRouter(db) {
     res.json({ document: row });
   });
 
+  registerWebAuthnRoutes(router, { db, attachUser, insertAudit });
+  registerBiometricRoutes(router, { db, attachUser, insertAudit });
+
   registerLeaveRoutes(router, db, {
     attachUser,
     can,
@@ -3760,6 +3816,7 @@ function createApiRouter(db) {
     requirePerm,
     todayLocalDate,
     uploadFace,
+    insertAudit,
   });
 
   router.get("/integrations/apps-script/status", attachUser, (req, res) => {

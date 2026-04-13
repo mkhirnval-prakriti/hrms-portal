@@ -44,6 +44,8 @@ const ROLE_MATRIX = {
     "documents:verify",
     "crm:read",
     "crm:write",
+    "biometric:admin",
+    "biometric:request_update",
   ],
   [ROLES.ATTENDANCE_MANAGER]: [
     "dashboard:read",
@@ -76,6 +78,8 @@ const ROLE_MATRIX = {
     "documents:verify",
     "crm:read",
     "crm:write",
+    "biometric:admin",
+    "biometric:request_update",
   ],
   [ROLES.LOCATION_MANAGER]: [
     "dashboard:read",
@@ -109,6 +113,8 @@ const ROLE_MATRIX = {
     "documents:verify",
     "crm:read",
     "crm:write",
+    "biometric:admin",
+    "biometric:request_update",
   ],
   [ROLES.USER]: [
     "dashboard:read_self",
@@ -123,6 +129,7 @@ const ROLE_MATRIX = {
     "notices:read",
     "timings:read_self",
     "payroll:read_self",
+    "biometric:request_update",
   ],
 };
 
