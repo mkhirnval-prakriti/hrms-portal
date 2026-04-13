@@ -40,6 +40,9 @@ out/
 data/*.sqlite
 data/*.sqlite-*
 data/*.db
+tmp*.sqlite
+tmp*.sqlite-shm
+tmp*.sqlite-wal
 cookies.txt
 tmp-login.json
 uploads/

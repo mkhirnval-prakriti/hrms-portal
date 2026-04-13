@@ -5,17 +5,16 @@ import tailwindcss from '@tailwindcss/vite'
 const API_PORT = process.env.VITE_API_PORT || '5000'
 const API_TARGET = `http://127.0.0.1:${API_PORT}`
 
+/** Replit / production: repo root `dist/` (see server.js). */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: '/',
   build: {
-    /** Replit / production: repo root `dist/` (see server.js STATIC_APP_DIR). */
     outDir: '../dist',
     emptyOutDir: true,
   },
   server: {
     port: 5173,
-    /** Allow localtunnel / ngrok / Cloudflare tunnel hostnames (not just localhost). */
     allowedHosts: true,
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },

@@ -1,12 +1,12 @@
-# HRMS — Replit Deploy
+# HRMS — Replit Deploy (auto-build + start; no manual steps)
 # Secrets: SESSION_SECRET, JWT_SECRET (see .env.example). Replit injects PORT.
 language = "nodejs"
-run = "npm run start"
+run = ["sh", "-c", "npm install && npm run build && npm start"]
 entrypoint = "server.js"
 
 [nix]
 channel = "stable-24_05"
 
 [deployment]
-run = ["sh", "-c", "npm install && npm run build && npm run start"]
+run = ["sh", "-c", "npm install && npm run build && npm start"]
 build = ["sh", "-c", "npm install && npm run build"]
