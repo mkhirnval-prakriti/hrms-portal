@@ -90,15 +90,26 @@ function resolveSqliteFilePath() {
     const dataDir = path.join(__dirname, "..", "data");
     resolved = path.join(dataDir, "hrms.sqlite");
   } else if (raw.startsWith("file:")) {
-    try {
-      const parsed = new URL(raw);
-      let p = parsed.pathname;
-      if (process.platform === "win32" && /^\/[A-Za-z]:/.test(p)) {
-        p = p.slice(1);
+    const afterScheme = raw.slice("file:".length);
+    // Node's `new URL("file:./data/x.sqlite")` becomes `/data/x.sqlite` (disk root) — wrong.
+    const isRelativeFilePath =
+      afterScheme.startsWith("./") ||
+      afterScheme.startsWith("../") ||
+      afterScheme.startsWith(".\\") ||
+      afterScheme.startsWith("..\\");
+    if (isRelativeFilePath) {
+      resolved = path.resolve(process.cwd(), afterScheme);
+    } else {
+      try {
+        const parsed = new URL(raw);
+        let p = parsed.pathname;
+        if (process.platform === "win32" && /^\/[A-Za-z]:/.test(p)) {
+          p = p.slice(1);
+        }
+        resolved = decodeURIComponent(p);
+      } catch {
+        resolved = raw.replace(/^file:\/+/, "").replace(/^\//, "");
       }
-      resolved = decodeURIComponent(p);
-    } catch {
-      resolved = raw.replace(/^file:\/+/, "").replace(/^\//, "");
     }
   } else {
     resolved = raw;
