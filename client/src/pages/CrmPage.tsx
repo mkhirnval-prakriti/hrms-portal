@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api } from '../api'
+import { useAuth } from '../context/AuthContext'
+import { canPerm } from '../lib/permissions'
 
 type Lead = {
   id: number
@@ -15,7 +17,10 @@ type Lead = {
 }
 
 export function CrmPage() {
+  const { user } = useAuth()
   const qc = useQueryClient()
+  const canRead = !!(user && canPerm(user, 'crm:read'))
+  const canWrite = !!(user && canPerm(user, 'crm:write'))
   const [full_name, setFullName] = useState('')
   const [phone, setPhone] = useState('')
   const [email, setEmail] = useState('')
@@ -26,6 +31,7 @@ export function CrmPage() {
   const leadsQ = useQuery({
     queryKey: ['crm', 'leads'],
     queryFn: () => api<{ leads: Lead[] }>('/crm/leads'),
+    enabled: canRead,
   })
 
   const createM = useMutation({
@@ -54,6 +60,14 @@ export function CrmPage() {
 
   const leads = leadsQ.data?.leads ?? []
 
+  if (!canRead) {
+    return (
+      <div className="ph-card mx-auto max-w-lg rounded-2xl p-8 text-center text-sm text-[#1f5e3b]">
+        CRM leads are restricted to Admin and Branch / Attendance managers. Contact HR if you need access.
+      </div>
+    )
+  }
+
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div>
@@ -63,11 +77,14 @@ export function CrmPage() {
 
       <section className="ph-card rounded-2xl border border-[#1f5e3b]/10 bg-white p-5 shadow-sm sm:p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-[#1f5e3b]/80">New lead</h2>
+        {!canWrite && (
+          <p className="mt-2 text-xs text-amber-800">You can view leads but cannot create new ones.</p>
+        )}
         <form
           className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
           onSubmit={(e) => {
             e.preventDefault()
-            if (!full_name.trim()) return
+            if (!canWrite || !full_name.trim()) return
             createM.mutate()
           }}
         >
@@ -78,6 +95,7 @@ export function CrmPage() {
               value={full_name}
               onChange={(e) => setFullName(e.target.value)}
               required
+              disabled={!canWrite}
             />
           </label>
           <label className="block text-sm">
@@ -86,6 +104,7 @@ export function CrmPage() {
               className="mt-1 w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm outline-none ring-[#2e7d32]/25 focus:ring-2"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
+              disabled={!canWrite}
             />
           </label>
           <label className="block text-sm">
@@ -95,6 +114,7 @@ export function CrmPage() {
               className="mt-1 w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm outline-none ring-[#2e7d32]/25 focus:ring-2"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              disabled={!canWrite}
             />
           </label>
           <label className="block text-sm">
@@ -103,6 +123,7 @@ export function CrmPage() {
               className="mt-1 w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm outline-none ring-[#2e7d32]/25 focus:ring-2"
               value={company}
               onChange={(e) => setCompany(e.target.value)}
+              disabled={!canWrite}
             />
           </label>
           <label className="block text-sm">
@@ -111,6 +132,7 @@ export function CrmPage() {
               className="mt-1 w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm outline-none ring-[#2e7d32]/25 focus:ring-2"
               value={status}
               onChange={(e) => setStatus(e.target.value)}
+              disabled={!canWrite}
             >
               <option value="new">new</option>
               <option value="contacted">contacted</option>
@@ -125,12 +147,13 @@ export function CrmPage() {
               className="mt-1 min-h-[72px] w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm outline-none ring-[#2e7d32]/25 focus:ring-2"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
+              disabled={!canWrite}
             />
           </label>
           <div className="sm:col-span-2 lg:col-span-3">
             <button
               type="submit"
-              disabled={createM.isPending}
+              disabled={!canWrite || createM.isPending}
               className="rounded-xl bg-gradient-to-r from-[#1f5e3b] to-[#2e7d32] px-5 py-2.5 text-sm font-semibold text-white shadow-md transition hover:brightness-[1.03] disabled:opacity-60"
             >
               {createM.isPending ? 'Saving…' : 'Save lead'}

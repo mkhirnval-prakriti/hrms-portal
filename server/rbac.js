@@ -42,6 +42,8 @@ const ROLE_MATRIX = {
     "payroll:write",
     "documents:read_all",
     "documents:verify",
+    "crm:read",
+    "crm:write",
   ],
   [ROLES.ATTENDANCE_MANAGER]: [
     "dashboard:read",
@@ -72,6 +74,8 @@ const ROLE_MATRIX = {
     "payroll:write",
     "documents:read_all",
     "documents:verify",
+    "crm:read",
+    "crm:write",
   ],
   [ROLES.LOCATION_MANAGER]: [
     "dashboard:read",
@@ -103,6 +107,8 @@ const ROLE_MATRIX = {
     "payroll:write",
     "documents:read_all",
     "documents:verify",
+    "crm:read",
+    "crm:write",
   ],
   [ROLES.USER]: [
     "dashboard:read_self",

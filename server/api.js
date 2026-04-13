@@ -502,6 +502,8 @@ function createApiRouter(db) {
       "documents:read_all",
       "documents:verify",
       "audit:read",
+      "crm:read",
+      "crm:write",
     ];
     keys.forEach((k) => {
       meta[k] = can(user, k);
@@ -3151,7 +3153,7 @@ function createApiRouter(db) {
   router.post("/employees", attachUser, requirePerm("users:create"), createEmployeeHandler);
   router.post("/staff", attachUser, requirePerm("users:create"), createEmployeeHandler);
 
-  router.get("/crm/leads", attachUser, (req, res) => {
+  router.get("/crm/leads", attachUser, requirePerm("crm:read"), (req, res) => {
     const rows = db
       .prepare(
         `SELECT l.id, l.full_name, l.phone, l.email, l.company, l.status, l.notes, l.created_at,
@@ -3165,7 +3167,7 @@ function createApiRouter(db) {
     res.json({ leads: rows });
   });
 
-  router.post("/crm/leads", attachUser, (req, res) => {
+  router.post("/crm/leads", attachUser, requirePerm("crm:write"), (req, res) => {
     const { full_name, phone, email, company, status, notes } = req.body || {};
     if (!full_name || !String(full_name).trim()) {
       return res.status(400).json({ error: "full_name required" });

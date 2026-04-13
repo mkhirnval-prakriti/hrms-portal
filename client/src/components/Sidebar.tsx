@@ -5,6 +5,7 @@ import { canPerm } from '../lib/permissions'
 
 const items: { to: string; label: string; Icon: FC<{ className?: string }> }[] = [
   { to: '/', label: 'Dashboard', Icon: IconHome },
+  { to: '/reports', label: 'Reports', Icon: IconChart },
   { to: '/attendance', label: 'Attendance', Icon: IconClock },
   { to: '/crm', label: 'CRM Leads', Icon: IconBriefcase },
   { to: '/employees', label: 'Employees', Icon: IconUsers },
@@ -44,6 +45,8 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     if (it.to === '/leaves') return canPerm(user, 'leave:read_all') || canPerm(user, 'leave:read_self')
     if (it.to === '/payroll') return canPerm(user, 'payroll:read') || canPerm(user, 'payroll:read_self')
     if (it.to === '/office') return canPerm(user, 'branches:read')
+    if (it.to === '/reports') return canPerm(user, 'export:read') || canPerm(user, 'dashboard:read')
+    if (it.to === '/crm') return canPerm(user, 'crm:read')
     if (it.to === '/company' || it.to === '/guide' || it.to === '/notices') return true
     if (it.to === '/trash') return user.role === 'SUPER_ADMIN'
     return true
@@ -102,6 +105,14 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         {aside}
       </div>
     </>
+  )
+}
+
+function IconChart({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+    </svg>
   )
 }
 
