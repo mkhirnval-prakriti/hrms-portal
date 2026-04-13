@@ -1,30 +1,12 @@
 require("dotenv").config();
 
-const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
 
-/** Replit / zero-config: never require manual secrets (warn in production). */
-function ensureRuntimeSecret(name, byteLength, label) {
-  const existing = String(process.env[name] || "").trim();
-  if (existing) return existing;
-  const generated = crypto.randomBytes(byteLength).toString("hex");
-  process.env[name] = generated;
-  if (process.env.NODE_ENV === "production") {
-    console.warn(
-      `[hrms] ${label}: ${name} was not set — auto-generated. Logins stay valid until restart; set ${name} in Replit Secrets for stable sessions/tokens.`
-    );
-  }
-  return generated;
-}
-
-ensureRuntimeSecret("SESSION_SECRET", 32, "Security");
-ensureRuntimeSecret("JWT_SECRET", 48, "Security");
-
-const { openDb } = require("./server/db");
+const { openDb, hydrateRuntimeSecrets } = require("./server/db");
 const { createApiRouter } = require("./server/api");
 const { runStartupSmokeTest } = require("./server/appsScriptSync");
 const { sendDailyHrmsReport } = require("./server/dailyReport");
@@ -94,23 +76,6 @@ app.use((_req, res, next) => {
   next();
 });
 
-const db = openDb();
-const apiRouter = createApiRouter(db);
-
-function purgeDeletedUsers() {
-  const mode = String(process.env.TRASH_RETENTION_MODE || "days").toLowerCase();
-  const days = Number(process.env.TRASH_RETENTION_DAYS || 30);
-  const minutes = Number(process.env.TRASH_RETENTION_MINUTES || 30);
-  if (mode === "minutes" && Number.isFinite(minutes) && minutes > 0) {
-    return db
-      .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
-      .run(`-${Math.floor(minutes)} minutes`);
-  }
-  return db
-    .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
-    .run(`-${Math.floor(days > 0 ? days : 30)} days`);
-}
-
 app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
@@ -132,6 +97,24 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use(express.json({ limit: "1mb" }));
+
+const db = openDb();
+hydrateRuntimeSecrets(db);
+const apiRouter = createApiRouter(db);
+
+function purgeDeletedUsers() {
+  const mode = String(process.env.TRASH_RETENTION_MODE || "days").toLowerCase();
+  const days = Number(process.env.TRASH_RETENTION_DAYS || 30);
+  const minutes = Number(process.env.TRASH_RETENTION_MINUTES || 30);
+  if (mode === "minutes" && Number.isFinite(minutes) && minutes > 0) {
+    return db
+      .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
+      .run(`-${Math.floor(minutes)} minutes`);
+  }
+  return db
+    .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
+    .run(`-${Math.floor(days > 0 ? days : 30)} days`);
+}
 
 app.use(
   session({

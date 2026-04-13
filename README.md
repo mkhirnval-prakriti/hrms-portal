@@ -46,8 +46,8 @@ npm run verify   # requires server running on PORT
 | `PORT` | HTTP port (default **5000**) |
 | `HOST` | Bind address (default **0.0.0.0**) |
 | `NODE_ENV` | `development` / `production` |
-| `SESSION_SECRET` | Optional — auto-generated if unset (set in production on Replit for stable sessions) |
-| `JWT_SECRET` | Optional — auto-generated if unset; else falls back to `SESSION_SECRET` |
+| `SESSION_SECRET` | Optional — if unset, loaded from SQLite `integration_kv` or generated once and stored there (stable across restarts) |
+| `JWT_SECRET` | Optional — same pattern as `SESSION_SECRET` (separate KV key) |
 | `DB_PATH` | SQLite file (default `./data/hrms.sqlite`) |
 | `ALLOWED_ORIGINS` | Optional CORS: comma-separated origins, or `*`. Empty = same-origin only |
 | `CORS_STRICT` | Set `1` to skip auto localhost dev origins when `ALLOWED_ORIGINS` is set |
