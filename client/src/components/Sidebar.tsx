@@ -1,9 +1,12 @@
 import type { FC } from 'react'
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext'
+import { canPerm } from '../lib/permissions'
 
 const items: { to: string; label: string; Icon: FC<{ className?: string }> }[] = [
   { to: '/', label: 'Dashboard', Icon: IconHome },
   { to: '/attendance', label: 'Attendance', Icon: IconClock },
+  { to: '/crm', label: 'CRM Leads', Icon: IconBriefcase },
   { to: '/employees', label: 'Employees', Icon: IconUsers },
   { to: '/documents', label: 'Doc Verification', Icon: IconDoc },
   { to: '/leaves', label: 'Leaves', Icon: IconCalendar },
@@ -32,6 +35,19 @@ type SidebarProps = {
 
 export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const base = import.meta.env.BASE_URL
+  const { user } = useAuth()
+  const visibleItems = items.filter((it) => {
+    if (!user) return false
+    if (it.to === '/employees' || it.to === '/staff-mgmt') return canPerm(user, 'users:read')
+    if (it.to === '/attendance' || it.to === '/kiosk') return canPerm(user, 'attendance:punch')
+    if (it.to === '/documents') return canPerm(user, 'documents:read_all')
+    if (it.to === '/leaves') return canPerm(user, 'leave:read_all') || canPerm(user, 'leave:read_self')
+    if (it.to === '/payroll') return canPerm(user, 'payroll:read') || canPerm(user, 'payroll:read_self')
+    if (it.to === '/office') return canPerm(user, 'branches:read')
+    if (it.to === '/company' || it.to === '/guide' || it.to === '/notices') return true
+    if (it.to === '/trash') return user.role === 'SUPER_ADMIN'
+    return true
+  })
 
   const aside = (
     <aside className="flex h-full w-64 shrink-0 flex-col ph-brand-gradient text-white shadow-[4px_0_24px_rgba(31,94,59,0.15)]">
@@ -47,7 +63,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         </div>
       </div>
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-        {items.map((it) => (
+        {visibleItems.map((it) => (
           <NavLink
             key={it.to}
             to={it.to}
@@ -100,6 +116,17 @@ function IconClock({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  )
+}
+function IconBriefcase({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+      />
     </svg>
   )
 }

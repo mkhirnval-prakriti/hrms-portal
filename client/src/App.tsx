@@ -19,6 +19,7 @@ const CompanyPage = lazy(() => import('./pages/CompanyPage').then((m) => ({ defa
 const GuidePage = lazy(() => import('./pages/GuidePage').then((m) => ({ default: m.GuidePage })))
 const KioskPage = lazy(() => import('./pages/KioskPage').then((m) => ({ default: m.KioskPage })))
 const TrashPage = lazy(() => import('./pages/TrashPage').then((m) => ({ default: m.TrashPage })))
+const CrmPage = lazy(() => import('./pages/CrmPage').then((m) => ({ default: m.CrmPage })))
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, initializing } = useAuth()
@@ -59,6 +60,14 @@ export default function App() {
             element={
               <Suspense fallback={<PageSkeleton rows={6} />}>
                 <AttendancePage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="crm"
+            element={
+              <Suspense fallback={<PageSkeleton rows={6} />}>
+                <CrmPage />
               </Suspense>
             }
           />

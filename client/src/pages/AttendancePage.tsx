@@ -17,6 +17,7 @@ type AttRow = {
   punch_method_out?: string | null
   verification_in?: string | null
 }
+type WarnRow = { type: string; severity: string; message: string }
 
 export function AttendancePage() {
   const { user } = useAuth()
@@ -33,7 +34,10 @@ export function AttendancePage() {
   const [busy, setBusy] = useState(false)
   const [filterMethod, setFilterMethod] = useState<string>('')
   const [filterPhoto, setFilterPhoto] = useState<'all' | 'with' | 'without'>('all')
+  const [search, setSearch] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [wifiSsid, setWifiSsid] = useState('')
+  const [warnings, setWarnings] = useState<WarnRow[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -42,6 +46,15 @@ export function AttendancePage() {
 
   const today = localDateStr()
   const canAll = canPerm(user, 'history:read')
+  const [geoWarned, setGeoWarned] = useState(false)
+
+  function speak(text: string) {
+    if (!('speechSynthesis' in window)) return
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang = 'hi-IN'
+    window.speechSynthesis.cancel()
+    window.speechSynthesis.speak(u)
+  }
 
   const load = useCallback(async () => {
     setErr(null)
@@ -50,9 +63,12 @@ export function AttendancePage() {
       const q = `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
       const data = await api<{ records: AttRow[] }>('/attendance/history' + q)
       setRecords(data.records || [])
+      const w = await api<{ warnings: WarnRow[] }>('/warnings/me')
+      setWarnings(w.warnings || [])
     } catch (e) {
       setErr((e as Error).message)
       setRecords([])
+      setWarnings([])
     } finally {
       setLoading(false)
     }
@@ -82,6 +98,10 @@ export function AttendancePage() {
   } else if (filterPhoto === 'without') {
     filtered = filtered.filter((r) => !r.punch_in_photo)
   }
+  if (search.trim()) {
+    const q = search.trim().toLowerCase()
+    filtered = filtered.filter((r) => `${r.full_name || ''} ${r.user_id}`.toLowerCase().includes(q))
+  }
 
   async function punchJson(
     kind: 'in' | 'out',
@@ -97,6 +117,7 @@ export function AttendancePage() {
         type: kind,
         source: 'device',
         attendanceMethod: method === 'office' ? 'office' : method,
+        wifi_ssid: wifiSsid.trim() || undefined,
         ...extra,
       }
       if (useOffice) {
@@ -113,6 +134,8 @@ export function AttendancePage() {
       }
       await api(path, { method: 'POST', body: JSON.stringify(body) })
       setPunchMsg(kind === 'in' ? 'Checked in successfully.' : 'Checked out successfully.')
+      if (kind === 'in') speak('Welcome to Prakriti Herbs, aapki attendance lag gayi hai')
+      if (kind === 'out') speak('Prakriti Herbs mein aaj ki attendance dene ke liye dhanyavaad')
       await load()
     } catch (e) {
       setPunchMsg((e as Error).message || 'Punch failed')
@@ -179,6 +202,7 @@ export function AttendancePage() {
       fd.append('type', kind)
       fd.append('source', 'device')
       fd.append('attendanceMethod', 'face')
+      if (wifiSsid.trim()) fd.append('wifi_ssid', wifiSsid.trim())
       if (user?.branch_id) fd.append('useBranchCenter', 'true')
       fd.append('photo', faceBlob, 'face.jpg')
       const token = getToken()
@@ -192,6 +216,8 @@ export function AttendancePage() {
       const data = text ? JSON.parse(text) : null
       if (!res.ok) throw new Error(data?.error || res.statusText)
       setPunchMsg(kind === 'in' ? 'Checked in with face.' : 'Checked out with face.')
+      if (kind === 'in') speak('Welcome to Prakriti Herbs, aapki attendance lag gayi hai')
+      if (kind === 'out') speak('Prakriti Herbs mein aaj ki attendance dene ke liye dhanyavaad')
       setFaceBlob(null)
       if (previewUrl) URL.revokeObjectURL(previewUrl)
       setPreviewUrl(null)
@@ -204,6 +230,52 @@ export function AttendancePage() {
     }
   }
 
+  useEffect(() => {
+    if (!user?.shift_end) return
+    const [hh, mm] = String(user.shift_end).split(':').map((x) => Number(x) || 0)
+    const t = window.setInterval(() => {
+      const now = new Date()
+      if (now.getHours() === hh && Math.abs(now.getMinutes() - mm) <= 2) {
+        speak('Sir, aapka punch-out ka time ho gaya hai')
+      }
+    }, 60000)
+    return () => window.clearInterval(t)
+  }, [user?.shift_end])
+
+  useEffect(() => {
+    if (!user?.branch_id || geoWarned || !navigator.geolocation) return
+    let stop = false
+    let watchId: number | null = null
+    api<{ branches: { id: number; lat: number | null; lng: number | null; radius_meters: number }[] }>('/branches')
+      .then((d) => {
+        if (stop) return
+        const b = (d.branches || []).find((x) => Number(x.id) === Number(user.branch_id))
+        if (!b || b.lat == null || b.lng == null) return
+        watchId = navigator.geolocation.watchPosition((pos) => {
+          const r = Number(b.radius_meters || 300)
+          const toRad = (n: number) => (n * Math.PI) / 180
+          const R = 6371000
+          const dLat = toRad(pos.coords.latitude - Number(b.lat))
+          const dLng = toRad(pos.coords.longitude - Number(b.lng))
+          const a =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(Number(b.lat))) *
+              Math.cos(toRad(pos.coords.latitude)) *
+              Math.sin(dLng / 2) ** 2
+          const dist = 2 * R * Math.asin(Math.sqrt(a))
+          if (dist > r) {
+            speak('Aap allowed zone se bahar ja rahe hain')
+            setGeoWarned(true)
+          }
+        })
+      })
+      .catch(() => {})
+    return () => {
+      stop = true
+      if (watchId != null) navigator.geolocation.clearWatch(watchId)
+    }
+  }, [geoWarned, user?.branch_id])
+
   return (
     <div className="mx-auto max-w-[1200px] space-y-6 pb-8">
       <div>
@@ -213,6 +285,16 @@ export function AttendancePage() {
           table below.
         </p>
       </div>
+      {warnings.length > 0 && (
+        <div className="ph-card rounded-2xl border border-amber-200 bg-amber-50/60 p-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-amber-900">Auto warnings</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
+            {warnings.map((w, idx) => (
+              <li key={idx}>{w.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="ph-card rounded-2xl p-6">
         <h2 className="text-lg font-semibold text-[#1f5e3b]">Today · {today}</h2>
@@ -228,6 +310,10 @@ export function AttendancePage() {
           </p>
         )}
         <div className="mt-4 flex flex-wrap gap-2">
+          <label className="w-full text-sm">
+            <span className="mb-1 block font-medium text-[#1f5e3b]">WiFi SSID (optional, if office WiFi restriction enabled)</span>
+            <input value={wifiSsid} onChange={(e) => setWifiSsid(e.target.value)} className="w-full max-w-md rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm" placeholder="e.g. Prakriti-Office" />
+          </label>
           <span className="w-full text-xs font-semibold uppercase tracking-wide text-[#1f5e3b]/70">GPS</span>
           <button
             type="button"
@@ -388,12 +474,32 @@ export function AttendancePage() {
               <option value="without">Without photo</option>
             </select>
           </label>
+          <label className="text-sm">
+            <span className="mb-1 block font-medium text-[#1f5e3b]">Search</span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name / employee id"
+              className="rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm"
+            />
+          </label>
           <button
             type="button"
             onClick={load}
             className="rounded-xl bg-[#1f5e3b] px-4 py-2 text-sm font-semibold text-white"
           >
             Refresh
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setFilterMethod('')
+              setFilterPhoto('all')
+              setSearch('')
+            }}
+            className="rounded-xl border border-[#1f5e3b]/20 bg-white px-4 py-2 text-sm font-semibold text-[#1f5e3b]"
+          >
+            Clear filters
           </button>
         </div>
         {err && (
@@ -453,7 +559,11 @@ export function AttendancePage() {
                 ))}
               </tbody>
             </table>
-            {filtered.length === 0 && <p className="mt-4 text-sm text-[#1f5e3b]/60">No records in range.</p>}
+            {filtered.length === 0 && (
+              <p className="mt-4 text-sm text-[#1f5e3b]/60">
+                {search.trim() ? 'No attendance records match your search/filter.' : 'No records in selected range.'}
+              </p>
+            )}
           </div>
         )}
       </div>

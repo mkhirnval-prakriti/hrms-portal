@@ -5,15 +5,21 @@ const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
-const { openDb } = require("./src/db");
-const { createApiRouter } = require("./src/api");
-const { runStartupSmokeTest } = require("./src/appsScriptSync");
-const { sendDailyHrmsReport } = require("./src/dailyReport");
+const { openDb } = require("./server/db");
+const { createApiRouter } = require("./server/api");
+const { runStartupSmokeTest } = require("./server/appsScriptSync");
+const { sendDailyHrmsReport } = require("./server/dailyReport");
 
 const app = express();
 app.set("trust proxy", 1);
 
-const PORT = Number(process.env.PORT) || 5000;
+const PORT = Number(process.env.PORT);
+const effectivePort =
+  Number.isFinite(PORT) && PORT > 0 ? PORT : process.env.NODE_ENV === "production" ? null : 5000;
+if (effectivePort == null) {
+  console.error("FATAL: PORT must be set in production (Replit and hosts inject PORT).");
+  process.exit(1);
+}
 const HOST = process.env.HOST || "0.0.0.0";
 
 if (process.env.NODE_ENV === "production" && !String(process.env.SESSION_SECRET || "").trim()) {
@@ -77,6 +83,20 @@ app.use((_req, res, next) => {
 const db = openDb();
 const apiRouter = createApiRouter(db);
 
+function purgeDeletedUsers() {
+  const mode = String(process.env.TRASH_RETENTION_MODE || "days").toLowerCase();
+  const days = Number(process.env.TRASH_RETENTION_DAYS || 30);
+  const minutes = Number(process.env.TRASH_RETENTION_MINUTES || 30);
+  if (mode === "minutes" && Number.isFinite(minutes) && minutes > 0) {
+    return db
+      .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
+      .run(`-${Math.floor(minutes)} minutes`);
+  }
+  return db
+    .prepare("DELETE FROM users WHERE deleted_at IS NOT NULL AND datetime(deleted_at) <= datetime('now', ?)")
+    .run(`-${Math.floor(days > 0 ? days : 30)} days`);
+}
+
 app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
@@ -116,31 +136,7 @@ app.use(
 
 app.use("/api", apiRouter);
 
-/** Same handlers without `/api` prefix (mobile apps / Postman spec). */
-function forwardToApiRouter(suffixPath) {
-  return (req, res, next) => {
-    const q = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-    req.url = suffixPath + q;
-    apiRouter(req, res, next);
-  };
-}
-
-app.post("/login", express.json({ limit: "1mb" }), forwardToApiRouter("/login"));
-app.get("/attendance", forwardToApiRouter("/attendance"));
-app.post("/attendance/checkin", express.json({ limit: "1mb" }), forwardToApiRouter("/attendance/checkin"));
-app.post("/attendance/checkout", express.json({ limit: "1mb" }), forwardToApiRouter("/attendance/checkout"));
-app.get("/employees", forwardToApiRouter("/employees"));
-app.post("/employees", express.json({ limit: "1mb" }), forwardToApiRouter("/employees"));
-app.get("/logs", forwardToApiRouter("/logs"));
-app.get("/reports", forwardToApiRouter("/reports"));
-
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-app.get("/", (_req, res) => {
-  res.redirect(302, "/app/");
-});
-
-app.use(express.static("public"));
 
 app.get("/old", (req, res) => {
   res.redirect(302, "/legacy/");
@@ -159,24 +155,24 @@ app.get(/^\/portal(\/.*)?$/, (req, res, next) => {
   res.sendFile(path.join(__dirname, "public", "portal", "index.html"));
 });
 
-/** React + Tailwind HRMS UI — Vite build default: `dist/app/` (override with STATIC_APP_DIR). */
+/** React (Vite) build — served before root `public/` so `/` is the HRMS SPA. */
 const staticAppDir = process.env.STATIC_APP_DIR
   ? path.resolve(process.env.STATIC_APP_DIR)
-  : path.join(__dirname, "dist", "app");
+  : path.join(__dirname, "dist");
 const appIndex = path.join(staticAppDir, "index.html");
 if (!fs.existsSync(appIndex)) {
-  console.warn(
-    `[hrms] SPA bundle not found at ${appIndex}. Run: npm run build  (Vite outputs to dist/app/)`
-  );
+  console.warn(`[hrms] SPA bundle not found at ${appIndex}. Run: npm run build`);
 }
-app.use("/app", express.static(staticAppDir));
-app.get(/^\/app\/?$/, (req, res) => {
-  res.sendFile(appIndex);
-});
-/** SPA fallback for client-side routes if using history mode later (skips files with extensions). */
-app.get(/^\/app\/.+/, (req, res, next) => {
+app.use(express.static(staticAppDir));
+app.use(express.static("public"));
+/** Optional History-style paths: skip APIs, uploads, legacy, portal, and real files. */
+app.get(/^\/.+/, (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
   if (path.extname(req.path)) return next();
+  if (req.path.startsWith("/api")) return next();
+  if (req.path.startsWith("/uploads")) return next();
+  if (req.path.startsWith("/legacy")) return next();
+  if (req.path.startsWith("/portal")) return next();
   res.sendFile(appIndex);
 });
 
@@ -192,12 +188,12 @@ app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.message || "Server error" });
 });
 
-const server = app.listen(PORT, HOST, () => {
+const server = app.listen(effectivePort, HOST, () => {
   console.log("Server Running");
   console.log(
     process.env.RENDER
-      ? `Listening on ${HOST}:${PORT} (Render)`
-      : `http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`
+      ? `Listening on ${HOST}:${effectivePort} (Render)`
+      : `http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${effectivePort}`
   );
   setImmediate(() => {
     runStartupSmokeTest(db).catch((e) => console.error("[appsScriptSync] startup test", e.message));
@@ -205,11 +201,18 @@ const server = app.listen(PORT, HOST, () => {
   setInterval(() => {
     sendDailyHrmsReport(db).catch((e) => console.error("[dailyReport]", e.message));
   }, 24 * 60 * 60 * 1000);
+  setInterval(() => {
+    try {
+      purgeDeletedUsers();
+    } catch (e) {
+      console.error("[trash-retention]", e.message);
+    }
+  }, 10 * 60 * 1000);
 });
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`Port ${PORT} is already in use. Stop the other process or set PORT.`);
+    console.error(`Port ${effectivePort} is already in use. Stop the other process or set PORT.`);
     process.exit(1);
   }
   throw err;

@@ -27,10 +27,8 @@ coverage/
 .nyc_output/
 *.tsbuildinfo
 
-# Build outputs (root / tooling) — SPA bundle at dist/app/ is tracked for Replit/deploy
-/dist/*
-!/dist/app/
-!/dist/app/**
+# Build outputs (Vite → repo root `dist/`)
+/dist/
 build/
 .next/
 out/
@@ -54,5 +52,5 @@ uploads/
 # Vercel / deploy
 .vercel
 
-# Legacy Vite output (use dist/app only)
+# Legacy Vite output
 public/app/

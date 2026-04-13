@@ -27,6 +27,10 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
     afterLeaveChange(row.id);
     res.json({ leave: row });
   });
+  router.post("/leaves", attachUser, (req, res, next) => {
+    req.url = "/leave/apply";
+    return router.handle(req, res, next);
+  });
 
   router.get("/leave", attachUser, (req, res) => {
     const u = req.currentUser;
@@ -55,6 +59,10 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
       return res.json({ leaves: rows });
     }
     return res.status(403).json({ error: "Forbidden" });
+  });
+  router.get("/leaves", attachUser, (req, res, next) => {
+    req.url = "/leave";
+    return router.handle(req, res, next);
   });
 
   function getLeave(id) {
@@ -179,6 +187,47 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
     afterLeaveChange(row.id);
     setImmediate(() => notifyLeaveWhatsApp(db, row.id).catch(() => {}));
     res.json({ leave: updated });
+  });
+
+  router.put("/leaves/:id", attachUser, (req, res) => {
+    const { final_status, comment } = req.body || {};
+    const desired = String(final_status || "").toUpperCase();
+    if (desired !== "APPROVED" && desired !== "REJECTED") {
+      return res.status(400).json({ error: "final_status must be APPROVED or REJECTED" });
+    }
+    const id = Number(req.params.id);
+    if (req.currentUser.role === ROLES.SUPER_ADMIN) {
+      req.params.id = String(id);
+      req.body = { comment: comment || null };
+      if (desired === "APPROVED") req.url = `/leave/${id}/admin-approve`;
+      else req.url = `/leave/${id}/admin-reject`;
+      return router.handle(req, res, () => {});
+    }
+    if (!can(req.currentUser, "leave:approve_manager")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    req.params.id = String(id);
+    req.body = { comment: comment || null };
+    if (desired === "APPROVED") req.url = `/leave/${id}/manager-approve`;
+    else req.url = `/leave/${id}/manager-reject`;
+    return router.handle(req, res, () => {});
+  });
+
+  router.delete("/leaves/:id", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const row = db.prepare("SELECT * FROM leave_requests WHERE id = ?").get(id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    const isOwner = Number(row.user_id) === Number(req.currentUser.id);
+    const canDeleteAny = req.currentUser.role === ROLES.SUPER_ADMIN || can(req.currentUser, "leave:approve_manager");
+    if (!isOwner && !canDeleteAny) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    db.prepare("DELETE FROM leave_requests WHERE id = ?").run(id);
+    if (typeof auditLeave === "function") {
+      auditLeave(req.currentUser.id, "leave_delete", id, {});
+    }
+    afterLeaveChange(id);
+    res.json({ ok: true, id });
   });
 }
 

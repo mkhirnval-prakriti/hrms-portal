@@ -16,6 +16,8 @@ export type AuthUser = {
   full_name: string
   role: string
   branch_id: number | null
+  shift_start?: string
+  shift_end?: string
   permissions?: Record<string, boolean>
 }
 
@@ -36,6 +38,8 @@ type LoginSuccessPayload = {
   full_name: string
   role: string
   branch_id?: number | null
+  shift_start?: string
+  shift_end?: string
   permissions?: Record<string, boolean>
 }
 
@@ -49,6 +53,8 @@ function mapLoginToUser(data: LoginSuccessPayload): AuthUser {
     full_name: data.full_name,
     role: data.role,
     branch_id: data.branch_id ?? null,
+    shift_start: data.shift_start,
+    shift_end: data.shift_end,
     permissions: data.permissions,
   }
 }

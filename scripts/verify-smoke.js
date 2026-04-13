@@ -43,7 +43,25 @@ async function main() {
     throw new Error(`unknown /api route expected 404, got ${r.status}`);
   }
 
-  console.log("verify-smoke: OK (health, api health, login validation, api 404)");
+  r = await request("GET", "/api/staff");
+  if (r.status !== 401) {
+    throw new Error(`GET /api/staff without auth expected 401, got ${r.status}`);
+  }
+
+  r = await request("GET", "/api/crm/leads");
+  if (r.status !== 401) {
+    throw new Error(`GET /api/crm/leads without auth expected 401, got ${r.status}`);
+  }
+
+  r = await request("GET", "/");
+  if (r.status !== 200) {
+    throw new Error(`GET / SPA expected 200, got ${r.status}`);
+  }
+  if (!String(r.body).includes("root")) {
+    throw new Error("GET / expected HTML with root mount");
+  }
+
+  console.log("verify-smoke: OK (health, APIs, staff/crm auth, SPA index)");
 }
 
 main().catch((e) => {

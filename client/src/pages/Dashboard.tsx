@@ -148,7 +148,7 @@ export function Dashboard() {
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight text-[#1f5e3b] sm:text-3xl">Dashboard</h1>
           <p className="text-sm text-[#1f5e3b]/65">
-            Live overview · refreshes every {POLL_MS / 1000}s · {t.date}
+            Data as of: {t.date} · refreshes every {POLL_MS / 1000}s
           </p>
         </div>
         <span className="inline-flex items-center gap-2 rounded-full border border-[#66bb6a]/35 bg-white px-3 py-1 text-xs font-semibold text-[#1f5e3b] shadow-sm">
@@ -210,12 +210,7 @@ export function Dashboard() {
             onClick={() => openDrill('Present (incl. half)', 'present')}
           />
           <StatCard label="Late" value={t.late} variant="late" onClick={() => openDrill('Late', 'late')} />
-          <StatCard
-            label="Absent + Leave"
-            value={t.absent + (t.onLeave || 0)}
-            variant="absent"
-            onClick={() => openDrill('Absent', 'absent')}
-          />
+          <StatCard label="Absent + Leave" value={t.absent + (t.onLeave || 0)} variant="absent" onClick={() => openDrill('Absent', 'absent')} />
         </div>
         {(t.halfDay != null || t.punchInCount != null) && (
           <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -260,7 +255,7 @@ export function Dashboard() {
               <ul className="space-y-2.5">
                 {data.highlights.topPerformers.slice(0, 5).map((p, i) => (
                   <li key={i} className="flex justify-between gap-2 text-sm">
-                    <span className="font-medium text-[#14261a]">{p.name}</span>
+                    <span className="font-medium text-[#14261a]" title={`${p.name} | ${p.branch} | score ${p.score}%`}>{p.name}</span>
                     <span className="shrink-0 text-[#2e7d32]">
                       {p.score}% · {p.branch}
                     </span>
@@ -415,11 +410,11 @@ function StatCard({
 }) {
   const grad =
     variant === 'brand'
-      ? 'from-[#1f5e3b] via-[#2a6d47] to-[#1f5e3b]'
+      ? 'from-[#1F5E3B] via-[#2f7a4a] to-[#1F5E3B]'
       : variant === 'present'
-        ? 'from-[#2e7d32] to-[#66bb6a]'
+        ? 'from-[#4CAF50] to-[#81C784]'
         : variant === 'late'
-          ? 'from-[#f9a825] to-[#fbc02d]'
+          ? 'from-[#C9A227] to-[#d5b85b]'
           : 'from-[#c62828] to-[#e53935]'
 
   return (
@@ -432,7 +427,7 @@ function StatCard({
       >
         <div className="pointer-events-none absolute -right-6 -top-6 h-24 w-24 rounded-full bg-white/10 blur-2xl" />
         <div className="relative text-[11px] font-semibold uppercase tracking-[0.12em] text-white/90">{label}</div>
-        <div className="relative mt-2 text-4xl font-bold tabular-nums tracking-tight sm:text-[2.75rem]">{value}</div>
+        <div className="ph-kpi-value relative mt-2 tabular-nums tracking-tight">{value}</div>
         {onClick && <div className="relative mt-1 text-[10px] font-medium text-white/80">Tap for list</div>}
       </button>
     </div>

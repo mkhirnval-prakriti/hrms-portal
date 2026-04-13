@@ -25,6 +25,7 @@ export function LeavesPage() {
   const [end, setEnd] = useState('')
   const [reason, setReason] = useState('')
   const [comment, setComment] = useState('')
+  const [search, setSearch] = useState('')
 
   const canApply = canPerm(user, 'leave:apply')
   const canMgr = canPerm(user, 'leave:approve_manager')
@@ -111,6 +112,12 @@ export function LeavesPage() {
     }
   }
 
+  const filteredLeaves = leaves.filter((L) => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return `${L.full_name || ''} ${L.user_id} ${L.reason}`.toLowerCase().includes(q)
+  })
+
   return (
     <div className="mx-auto max-w-[1000px] space-y-6 pb-8">
       <div>
@@ -176,16 +183,31 @@ export function LeavesPage() {
       <div className="ph-card rounded-2xl p-6">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[#1f5e3b]">Requests</h2>
-          <button type="button" onClick={load} className="text-sm font-medium text-[#1f5e3b] underline">
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name / employee id / reason"
+              className="rounded-xl border border-[#1f5e3b]/15 px-3 py-1.5 text-xs"
+            />
+            <button type="button" onClick={load} className="text-sm font-medium text-[#1f5e3b] underline">
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              className="rounded-lg border border-[#1f5e3b]/20 px-2 py-1 text-xs font-semibold text-[#1f5e3b]"
+            >
+              Clear
+            </button>
+          </div>
         </div>
         {err && <p className="mt-3 text-sm text-red-600">{err}</p>}
         {loading ? (
           <p className="mt-4 text-sm">Loading…</p>
         ) : (
           <div className="mt-4 space-y-4">
-            {leaves.map((L) => (
+            {filteredLeaves.map((L) => (
               <div
                 key={L.id}
                 className="rounded-xl border border-[#1f5e3b]/10 bg-white/80 p-4 text-sm shadow-sm"
@@ -246,7 +268,11 @@ export function LeavesPage() {
                 </div>
               </div>
             ))}
-            {leaves.length === 0 && <p className="text-sm text-[#1f5e3b]/60">No leave requests.</p>}
+            {filteredLeaves.length === 0 && (
+              <p className="text-sm text-[#1f5e3b]/60">
+                {search.trim() ? 'No leave requests match your search.' : 'No leave requests.'}
+              </p>
+            )}
           </div>
         )}
       </div>

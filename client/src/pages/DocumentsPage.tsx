@@ -22,6 +22,7 @@ export function DocumentsPage() {
   const qc = useQueryClient()
   const [file, setFile] = useState<File | null>(null)
   const [docType, setDocType] = useState('aadhaar')
+  const [search, setSearch] = useState('')
 
   const canVerify = canPerm(user, 'documents:verify')
   const canAll = canPerm(user, 'documents:read_all')
@@ -63,7 +64,11 @@ export function DocumentsPage() {
     setFile(null)
   }
 
-  const docs = listQ.data ?? []
+  const docs = (listQ.data ?? []).filter((d) => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return `${d.doc_type} ${d.file_name} ${d.user_name || ''} ${d.user_id}`.toLowerCase().includes(q)
+  })
 
   return (
     <div className="mx-auto max-w-[1000px] space-y-6 pb-8">
@@ -115,13 +120,28 @@ export function DocumentsPage() {
       <div className="ph-card rounded-2xl p-6">
         <div className="flex justify-between">
           <h2 className="text-lg font-semibold text-[#1f5e3b]">Documents</h2>
-          <button
-            type="button"
-            onClick={() => listQ.refetch()}
-            className="text-sm text-[#1f5e3b] underline"
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name / employee id / file / type"
+              className="rounded-xl border border-[#1f5e3b]/15 px-3 py-1.5 text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => listQ.refetch()}
+              className="text-sm text-[#1f5e3b] underline"
+            >
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              className="rounded-lg border border-[#1f5e3b]/20 px-2 py-1 text-xs font-semibold text-[#1f5e3b]"
+            >
+              Clear
+            </button>
+          </div>
         </div>
         {listQ.error && (
           <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-4 text-sm text-red-800">
@@ -189,7 +209,11 @@ export function DocumentsPage() {
                 )}
               </div>
             ))}
-            {docs.length === 0 && <p className="text-sm text-[#1f5e3b]/60">No documents yet.</p>}
+            {docs.length === 0 && (
+              <p className="text-sm text-[#1f5e3b]/60">
+                {search.trim() ? 'No documents match your search.' : 'No documents yet.'}
+              </p>
+            )}
           </div>
         )}
         {verifyMut.error && (

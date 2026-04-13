@@ -13,6 +13,8 @@ const ROLE_MATRIX = {
     "dashboard:read",
     "branches:read",
     "branches:write",
+    "departments:read",
+    "departments:write",
     "attendance:self",
     "attendance:read_all",
     "attendance:punch",
@@ -44,6 +46,7 @@ const ROLE_MATRIX = {
   [ROLES.ATTENDANCE_MANAGER]: [
     "dashboard:read",
     "branches:read",
+    "departments:read",
     "attendance:self",
     "attendance:read_all",
     "attendance:punch",
@@ -87,6 +90,7 @@ const ROLE_MATRIX = {
     "integrations:sync",
     "branches:read",
     "branches:write",
+    "departments:read",
     "users:read",
     "users:create",
     "users:update",
@@ -136,7 +140,7 @@ function listRolesMeta() {
     },
     {
       id: ROLES.LOCATION_MANAGER,
-      label: "Location Manager",
+      label: "Branch Manager",
       description:
         "Branches & GPS, create users, edit attendance, geo-fencing context.",
     },

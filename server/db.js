@@ -4,8 +4,28 @@ const { DatabaseSync } = require("node:sqlite");
 const bcrypt = require("bcryptjs");
 const { ROLES } = require("./rbac");
 
-const dataDir = path.join(__dirname, "..", "data");
-const dbPath = process.env.DB_PATH || path.join(dataDir, "hrms.sqlite");
+function resolveSqliteFilePath() {
+  const raw = (process.env.DATABASE_URL || process.env.DB_PATH || "").trim();
+  if (!raw) {
+    const dataDir = path.join(__dirname, "..", "data");
+    return path.join(dataDir, "hrms.sqlite");
+  }
+  if (raw.startsWith("file:")) {
+    try {
+      const parsed = new URL(raw);
+      let p = parsed.pathname;
+      if (process.platform === "win32" && /^\/[A-Za-z]:/.test(p)) {
+        p = p.slice(1);
+      }
+      return decodeURIComponent(p);
+    } catch {
+      return raw.replace(/^file:\/+/, "").replace(/^\//, "");
+    }
+  }
+  return raw;
+}
+
+const dbPath = resolveSqliteFilePath();
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -101,6 +121,12 @@ function migrate(db) {
   tryAddColumn(db, "users", "allow_face INTEGER NOT NULL DEFAULT 0");
   tryAddColumn(db, "users", "allow_manual INTEGER NOT NULL DEFAULT 1");
   tryAddColumn(db, "users", "allow_biometric INTEGER NOT NULL DEFAULT 0");
+  tryAddColumn(db, "users", "profile_photo TEXT");
+  tryAddColumn(db, "users", "dob TEXT");
+  tryAddColumn(db, "users", "address TEXT");
+  tryAddColumn(db, "users", "account_number TEXT");
+  tryAddColumn(db, "users", "ifsc TEXT");
+  tryAddColumn(db, "users", "bank_name TEXT");
   tryAddColumn(db, "users", "deleted_at TEXT");
 
   tryAddColumn(db, "branches", "address TEXT");
@@ -143,6 +169,13 @@ function migrate(db) {
   tryAddColumn(db, "employee_documents", "bank_name TEXT");
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS departments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS leave_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -371,6 +404,22 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_apps_script_log_created ON apps_script_sync_log(created_at);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS crm_leads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      full_name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      company TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      notes TEXT,
+      created_by INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_crm_leads_created ON crm_leads(created_at);
+  `);
 }
 
 function openDb() {
@@ -449,9 +498,150 @@ function openDb() {
     seedInitialOrg(db);
   }
 
+  ensureBootstrapData(db);
   ensurePrakritiSuperAdmin(db);
 
   return db;
+}
+
+function normalizeEmailFromName(name) {
+  return `${String(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")}.${Date.now()}@prakriti.local`;
+}
+
+function ensureBootstrapData(db) {
+  const branchByName = new Map();
+  const rows = db.prepare("SELECT id, name FROM branches").all();
+  rows.forEach((r) => branchByName.set(String(r.name).toLowerCase(), r.id));
+
+  const requiredBranches = [
+    { name: "Jaipur", lat: 26.99334, lng: 75.73716, radius_meters: 400 },
+    { name: "Amritsar", lat: 31.66749, lng: 74.87296, radius_meters: 400 },
+    { name: "Meerut", lat: 28.96237, lng: 77.69552, radius_meters: 400 },
+  ];
+  const requiredDepartments = [
+    "Sales Executive",
+    "Courier Department",
+    "IT",
+    "Sales Employee",
+    "Courier",
+    "Sales",
+    "Support",
+    "Packing",
+  ];
+  for (const b of requiredBranches) {
+    const key = b.name.toLowerCase();
+    if (!branchByName.has(key)) {
+      const info = db
+        .prepare("INSERT INTO branches (name, lat, lng, radius_meters) VALUES (?,?,?,?)")
+        .run(b.name, b.lat, b.lng, b.radius_meters);
+      branchByName.set(key, info.lastInsertRowid);
+    } else {
+      db.prepare("UPDATE branches SET lat = ?, lng = ?, radius_meters = ? WHERE id = ?").run(
+        b.lat,
+        b.lng,
+        b.radius_meters,
+        branchByName.get(key)
+      );
+    }
+  }
+  for (const dep of requiredDepartments) {
+    db.prepare("INSERT OR IGNORE INTO departments (name, active) VALUES (?, 1)").run(dep);
+  }
+
+  const amritsarId = branchByName.get("amritsar") || null;
+  const jaipurId = branchByName.get("jaipur") || null;
+  const meerutId = branchByName.get("meerut") || null;
+  const defaultBranchId = amritsarId || jaipurId || meerutId || null;
+  const defaultHash = bcrypt.hashSync(process.env.SEED_DEMO_PASSWORD || "ChangeMe!123", 10);
+
+  const preloadEmployees = [
+    { name: "Simran kaur", login_id: "PH-AMR-102", role: ROLES.LOCATION_MANAGER, branch_id: amritsarId },
+    { name: "Manpreet kaur", login_id: "PH-AMR-103", role: ROLES.USER, branch_id: amritsarId },
+    { name: "ANIL", login_id: "PH-AMR-105", role: ROLES.USER, branch_id: amritsarId },
+    { name: "VARSHA TAILOR" },
+    { name: "SHEETAL KUMARI" },
+    { name: "RAVI PHOGAT" },
+    { name: "SONU" },
+    { name: "SANJU GARHWAL" },
+    { name: "SHANU MEENA" },
+    { name: "Shivani Sachdeva" },
+    { name: "Harpreet kaur" },
+    { name: "Simranjit kaur" },
+    { name: "Simarjit kaur" },
+    { name: "Rajwinder kaur" },
+    { name: "PALAK LAKHERA" },
+    { name: "KANCHAN PRAJAPAT" },
+    { name: "Monu" },
+    { name: "Jeevan sharma" },
+    { name: "Parul" },
+    { name: "Gaurav" },
+    { name: "Ankit" },
+    { name: "Jasdeep Singh" },
+    { name: "Rakesh kumar" },
+    { name: "Karanvir Singh" },
+    { name: "POOJA VERMA" },
+    { name: "GALAXY PRAJAPAT" },
+    { name: "Rajneet kaur" },
+    { name: "KHUSHBOO PAREEK" },
+    { name: "Karanveer old" },
+    { name: "Maninder Singh" },
+    { name: "Mukesh" },
+    { name: "Muskan" },
+    { name: "Roshni" },
+    { name: "BHUMIKA KANWAR" },
+    { name: "VRASHA RAJPUT" },
+    { name: "Rupali" },
+    { name: "Anjali sonwal" },
+    { name: "VISHAL SHARMA" },
+    { name: "ALOK KUMAR" },
+    { name: "SURAJ KUMAR" },
+    { name: "SHAIKH NOOR" },
+    { name: "Naveen Kumar" },
+    { name: "TANNU" },
+    { name: "HIMANSHU" },
+    { name: "Deepak Maheswari" },
+  ];
+
+  for (const e of preloadEmployees) {
+    const existing =
+      (e.login_id && db.prepare("SELECT id FROM users WHERE login_id = ?").get(e.login_id)) ||
+      db
+        .prepare("SELECT id FROM users WHERE lower(full_name) = lower(?) AND deleted_at IS NULL")
+        .get(e.name);
+    if (existing) continue;
+    db.prepare(
+      `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active)
+       VALUES (?,?,?,?,?,?, '09:00', '18:00', 15, 1)`
+    ).run(
+      normalizeEmailFromName(e.name),
+      e.login_id || null,
+      defaultHash,
+      e.name,
+      e.role || ROLES.USER,
+      e.branch_id || defaultBranchId
+    );
+  }
+
+  const companyKey = "company_profile";
+  const row = db.prepare("SELECT v FROM integration_kv WHERE k = ?").get(companyKey);
+  if (!row || !row.v) {
+    db.prepare("INSERT OR REPLACE INTO integration_kv (k, v) VALUES (?, ?)").run(
+      companyKey,
+      JSON.stringify({
+        company_name: "Prakriti Herbs Private Limited",
+        address: "Amer, Jaipur, Rajasthan - 302012",
+        city: "Jaipur",
+        state: "Rajasthan",
+        pincode: "302012",
+        gstin: "08AAQCP4095D1Z2",
+        cin: "U46497RJ2025PTC109202",
+        director: "Mandeep Kumar",
+      })
+    );
+  }
 }
 
 function seedInitialOrg(db) {

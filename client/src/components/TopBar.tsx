@@ -14,9 +14,9 @@ function roleLabel(role: string) {
   const m: Record<string, string> = {
     SUPER_ADMIN: 'Super Admin',
     ADMIN: 'Admin',
-    ATTENDANCE_MANAGER: 'HR',
-    LOCATION_MANAGER: 'Location',
-    USER: 'Employee',
+    ATTENDANCE_MANAGER: 'Attendance Manager',
+    LOCATION_MANAGER: 'Branch Manager',
+    USER: 'Staff',
   }
   return m[role] || role
 }

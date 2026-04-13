@@ -13,7 +13,7 @@
  */
 const path = require("path");
 const { google } = require("googleapis");
-const { loadServiceAccountCredentials } = require(path.join(__dirname, "..", "src", "googleServiceAccount.js"));
+const { loadServiceAccountCredentials } = require(path.join(__dirname, "..", "server", "googleServiceAccount.js"));
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
 const TAB_NAME = "TestImport";

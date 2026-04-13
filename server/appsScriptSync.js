@@ -1,16 +1,13 @@
 /**
  * Outbound sync to Google Apps Script Web App (dynamic JSON; no hardcoded business fields).
- * Env: GOOGLE_APPS_SCRIPT_WEBAPP_URL (optional override), APPS_SCRIPT_SYNC_ENABLED=0 to disable
+ * Env: GOOGLE_APPS_SCRIPT_WEBAPP_URL (required to enable outbound sync), APPS_SCRIPT_SYNC_ENABLED=0 to disable
  */
 const crypto = require("crypto");
-
-const DEFAULT_WEBAPP_URL =
-  "https://script.google.com/macros/s/AKfycbzARaUpHTiKlq37VAzK_4KrvwjE-H7x2tgfOuwFQK2WJUTqa0840LMshKdkx_j3RvmD/exec";
 
 const STRIP_KEYS = new Set(["password_hash"]);
 
 function getWebAppUrl() {
-  return (process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL || DEFAULT_WEBAPP_URL).trim();
+  return String(process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL || "").trim();
 }
 
 function isEnabled() {

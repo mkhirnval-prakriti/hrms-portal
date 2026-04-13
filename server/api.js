@@ -79,10 +79,10 @@ function signJwt(user) {
 
 function mapSimpleRole(role) {
   if (role === ROLES.USER) return "staff";
-  if (role === ROLES.LOCATION_MANAGER) return "manager";
+  if (role === ROLES.LOCATION_MANAGER) return "branch_manager";
   if (role === ROLES.SUPER_ADMIN) return "super_admin";
   if (role === ROLES.ADMIN) return "admin";
-  return "hr";
+  return "attendance_manager";
 }
 
 function mapIncomingRole(simple) {
@@ -95,6 +95,18 @@ function mapIncomingRole(simple) {
   return null;
 }
 
+function generateEmployeeLoginId() {
+  return `PH-EMP-${Date.now().toString().slice(-6)}`;
+}
+
+function branchCodeFromName(name) {
+  const raw = String(name || "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "");
+  if (!raw) return "GEN";
+  return raw.slice(0, 3).padEnd(3, "X");
+}
+
 function minutesBetweenIso(a, b) {
   if (!a || !b) return 0;
   const d = (new Date(b).getTime() - new Date(a).getTime()) / 60000;
@@ -103,6 +115,38 @@ function minutesBetweenIso(a, b) {
 
 function createApiRouter(db) {
   const router = express.Router();
+  function generateBranchEmployeeId(branchId) {
+    const b = branchId
+      ? db.prepare("SELECT id, name FROM branches WHERE id = ?").get(Number(branchId))
+      : null;
+    const code = branchCodeFromName(b?.name);
+    const row = db
+      .prepare(
+        `SELECT login_id FROM users
+         WHERE login_id LIKE ?
+         ORDER BY id DESC
+         LIMIT 1`
+      )
+      .get(`PH-${code}-%`);
+    const nextNum = (() => {
+      if (!row?.login_id) return 101;
+      const m = String(row.login_id).match(/-(\d+)$/);
+      return m ? Number(m[1]) + 1 : 101;
+    })();
+    return `PH-${code}-${String(nextNum).padStart(3, "0")}`;
+  }
+
+  function normalizeRoleInput(input) {
+    const raw = String(input || "").trim().toLowerCase();
+    if (raw === "super_admin" || raw === "super admin") return ROLES.SUPER_ADMIN;
+    if (raw === "admin") return ROLES.ADMIN;
+    if (raw === "branch_manager" || raw === "branch manager" || raw === "manager") return ROLES.LOCATION_MANAGER;
+    if (raw === "attendance_manager" || raw === "attendance manager" || raw === "hr") {
+      return ROLES.ATTENDANCE_MANAGER;
+    }
+    if (raw === "staff" || raw === "user") return ROLES.USER;
+    return mapIncomingRole(raw);
+  }
 
   const uploadRoot = path.join(__dirname, "..", "uploads", "attendance");
   fs.mkdirSync(uploadRoot, { recursive: true });
@@ -222,12 +266,14 @@ function createApiRouter(db) {
   function readCompanyProfile() {
     const r = db.prepare("SELECT v FROM integration_kv WHERE k = ?").get(COMPANY_PROFILE_KEY);
     const base = {
-      company_name: "Prakriti Herbs",
-      address: "",
-      city: "",
-      state: "",
-      pincode: "",
-      gstin: "",
+      company_name: "Prakriti Herbs Private Limited",
+      address: "Amer, Jaipur, Rajasthan - 302012",
+      city: "Jaipur",
+      state: "Rajasthan",
+      pincode: "302012",
+      gstin: "08AAQCP4095D1Z2",
+      cin: "U46497RJ2025PTC109202",
+      director: "Mandeep Kumar",
       phone: "",
       email: "",
     };
@@ -253,6 +299,15 @@ function createApiRouter(db) {
         kiosk: true,
         geo_fence: true,
         face_recognition: false,
+        wifi_restriction: false,
+      },
+      attendance_wifi: {
+        enabled: false,
+        allowed_ssids: [],
+      },
+      daily_report: {
+        enabled: true,
+        recipients: ["contact@prakritiherbs.in", "mkhirnval@gmail.com"],
       },
     };
   }
@@ -270,6 +325,105 @@ function createApiRouter(db) {
       APP_SETTINGS_KEY,
       JSON.stringify(obj)
     );
+  }
+  const SHEET_INTEGRATION_KEY = "sheet_integration_v1";
+  function readSheetIntegration() {
+    const row = db.prepare("SELECT v FROM integration_kv WHERE k = ?").get(SHEET_INTEGRATION_KEY);
+    const base = {
+      enabled: false,
+      mode: "webhook",
+      google_sheet_link: "",
+      api_key: "",
+      default_webhook_url: "",
+      branch_map: {},
+      last_sync_at: "",
+      last_error: "",
+    };
+    if (!row?.v) return base;
+    try {
+      return { ...base, ...JSON.parse(row.v) };
+    } catch {
+      return base;
+    }
+  }
+  function writeSheetIntegration(next) {
+    db.prepare("INSERT OR REPLACE INTO integration_kv (k, v) VALUES (?, ?)").run(
+      SHEET_INTEGRATION_KEY,
+      JSON.stringify(next)
+    );
+  }
+  function sheetConnectSnippet() {
+    return `fetch("YOUR_GOOGLE_SHEET_WEBHOOK_URL", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    employee_name: employee.name,
+    employee_id: employee.login_id,
+    branch: employee.branch,
+    role: employee.role,
+    punch_in: attendance.checkIn,
+    punch_out: attendance.checkOut,
+    total_hours: attendance.totalHours,
+    date: attendance.date
+  })
+});`;
+  }
+  async function pushAttendanceToConfiguredSheet(attendanceId) {
+    const cfg = readSheetIntegration();
+    if (!cfg.enabled) return { skipped: true, reason: "disabled" };
+    const row = db
+      .prepare(
+        `SELECT ar.id, ar.work_date, ar.punch_in_at, ar.punch_out_at, ar.status, u.full_name, u.login_id, u.role,
+                b.id AS branch_id, b.name AS branch_name
+         FROM attendance_records ar
+         JOIN users u ON u.id = ar.user_id
+         LEFT JOIN branches b ON b.id = u.branch_id
+         WHERE ar.id = ?`
+      )
+      .get(Number(attendanceId));
+    if (!row) return { skipped: true, reason: "not_found" };
+    const url =
+      (row.branch_id != null && cfg.branch_map && cfg.branch_map[String(row.branch_id)]) ||
+      cfg.default_webhook_url;
+    if (!url) return { skipped: true, reason: "no_webhook_url" };
+    const inAt = row.punch_in_at ? new Date(row.punch_in_at) : null;
+    const outAt = row.punch_out_at ? new Date(row.punch_out_at) : null;
+    const totalHours =
+      inAt && outAt ? Math.max(0, ((outAt.getTime() - inAt.getTime()) / 36e5)).toFixed(2) : "";
+    const payload = {
+      employee_name: row.full_name,
+      employee_id: row.login_id || "",
+      branch: row.branch_name || "",
+      role: row.role || "",
+      punch_in: row.punch_in_at || "",
+      punch_out: row.punch_out_at || "",
+      total_hours: totalHours,
+      date: row.work_date,
+      status: row.status,
+    };
+    try {
+      const r = await fetch(String(url), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error(`Webhook sync failed (${r.status})`);
+      writeSheetIntegration({
+        ...cfg,
+        last_sync_at: new Date().toISOString(),
+        last_error: "",
+      });
+      return { ok: true };
+    } catch (e) {
+      writeSheetIntegration({
+        ...cfg,
+        last_error: String(e.message || e),
+      });
+      return { ok: false, error: String(e.message || e) };
+    }
   }
 
   const PAYROLL_SETTINGS_KEY = "payroll_settings_v1";
@@ -318,6 +472,8 @@ function createApiRouter(db) {
       "history:edit",
       "branches:read",
       "branches:write",
+      "departments:read",
+      "departments:write",
       "users:read",
       "users:create",
       "users:update",
@@ -675,6 +831,16 @@ function createApiRouter(db) {
       if (punchMethod === "fingerprint" && Number(subject.allow_biometric) === 0) {
         return res.status(403).json({ error: "Fingerprint attendance is disabled for this account." });
       }
+      const wifiCfg = readAppSettings().attendance_wifi || { enabled: false, allowed_ssids: [] };
+      if (wifiCfg.enabled) {
+        const ssid = String(req.body?.wifi_ssid || req.body?.ssid || "").trim().toLowerCase();
+        const allowed = Array.isArray(wifiCfg.allowed_ssids)
+          ? wifiCfg.allowed_ssids.map((x) => String(x).trim().toLowerCase()).filter(Boolean)
+          : [];
+        if (!ssid || (allowed.length > 0 && !allowed.includes(ssid))) {
+          return res.status(403).json({ error: "Attendance allowed only on configured office WiFi SSID." });
+        }
+      }
 
       if (!useOfficeCenter && lat != null && lng != null && subject.allow_gps === 0) {
         raiseHrAlert({
@@ -830,6 +996,9 @@ function createApiRouter(db) {
       });
       scheduleAttendanceSync(db, rec.id);
       appsScriptScheduleAttendance(db, rec.id);
+      setImmediate(() => {
+        pushAttendanceToConfiguredSheet(rec.id).catch(() => {});
+      });
       setImmediate(() => {
         const u = db.prepare("SELECT full_name FROM users WHERE id = ?").get(subjectId);
         notifyPunchWhatsApp(db, {
@@ -1501,6 +1670,113 @@ function createApiRouter(db) {
       next(e);
     }
   });
+  router.get("/integrations/sheets/status", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can access sheet integration" });
+    }
+    const branches = db.prepare("SELECT id, name FROM branches ORDER BY name").all();
+    res.json({
+      ...readSheetIntegration(),
+      branches,
+      snippet: sheetConnectSnippet(),
+      guide: [
+        "1. Google Sheet open karo",
+        "2. Script editor kholo",
+        "3. Code paste karo",
+        "4. Deploy as webhook",
+        "5. Link copy karo",
+        "6. HRMS me paste karo",
+      ],
+    });
+  });
+  router.patch("/integrations/sheets/connect", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can access sheet integration" });
+    }
+    const cur = readSheetIntegration();
+    const branchMapIn = req.body?.branch_map;
+    const branchMap =
+      branchMapIn && typeof branchMapIn === "object"
+        ? Object.fromEntries(
+            Object.entries(branchMapIn).map(([k, v]) => [String(k), String(v || "").trim()])
+          )
+        : cur.branch_map || {};
+    const next = {
+      ...cur,
+      enabled: req.body?.enabled == null ? cur.enabled : !!req.body.enabled,
+      mode: req.body?.mode ? String(req.body.mode) : cur.mode,
+      google_sheet_link:
+        req.body?.google_sheet_link != null
+          ? String(req.body.google_sheet_link).trim()
+          : cur.google_sheet_link,
+      api_key: req.body?.api_key != null ? String(req.body.api_key).trim() : cur.api_key,
+      default_webhook_url:
+        req.body?.default_webhook_url != null
+          ? String(req.body.default_webhook_url).trim()
+          : cur.default_webhook_url,
+      branch_map: branchMap,
+    };
+    writeSheetIntegration(next);
+    insertAudit(req.currentUser.id, "sheet_connect_update", "settings", "sheet_integration", {
+      enabled: next.enabled,
+      mode: next.mode,
+      branchMapCount: Object.keys(next.branch_map || {}).length,
+    });
+    res.json(next);
+  });
+  router.post("/integrations/sheets/test-connection", attachUser, async (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can access sheet integration" });
+    }
+    const cfg = readSheetIntegration();
+    const testUrl = String(req.body?.webhook_url || cfg.default_webhook_url || "").trim();
+    if (!testUrl) return res.status(400).json({ error: "webhook_url required" });
+    try {
+      const r = await fetch(testUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
+        },
+        body: JSON.stringify({
+          test: true,
+          source: "hrms",
+          at: new Date().toISOString(),
+          message: "HRMS Test Connection",
+        }),
+      });
+      if (!r.ok) throw new Error(`Connection failed (${r.status})`);
+      writeSheetIntegration({ ...cfg, last_error: "", last_sync_at: new Date().toISOString() });
+      res.json({ ok: true });
+    } catch (e) {
+      writeSheetIntegration({ ...cfg, last_error: String(e.message || e) });
+      res.status(400).json({ error: String(e.message || e) });
+    }
+  });
+  router.post("/integrations/sheets/manual-sync", attachUser, async (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can access sheet integration" });
+    }
+    const branchId = req.body?.branch_id != null ? Number(req.body.branch_id) : null;
+    let sql =
+      "SELECT ar.id FROM attendance_records ar JOIN users u ON u.id = ar.user_id WHERE 1=1";
+    const params = [];
+    if (branchId != null) {
+      sql += " AND u.branch_id = ?";
+      params.push(branchId);
+    }
+    sql += " ORDER BY ar.id DESC LIMIT 300";
+    const ids = db.prepare(sql).all(...params).map((x) => Number(x.id));
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      // sequential to avoid webhook rate limit
+      const r = await pushAttendanceToConfiguredSheet(id);
+      if (r && r.ok) ok += 1;
+      else failed += 1;
+    }
+    res.json({ ok: true, synced: ok, failed });
+  });
 
   router.get("/dashboard/summary", attachUser, (req, res) => {
     const actor = req.currentUser;
@@ -1547,6 +1823,24 @@ function createApiRouter(db) {
     sql += " GROUP BY u.branch_id, b.name, ar.status ORDER BY b.name, ar.status";
     const rows = db.prepare(sql).all(...params);
     res.json({ scope: "org", from: fromDate, to: toDate, rows });
+  });
+
+  router.get("/dashboard", attachUser, (req, res) => {
+    const today = todayLocalDate();
+    const totalStaff = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM users WHERE active = 1 AND deleted_at IS NULL").get().c
+    );
+    const present = Number(
+      db
+        .prepare("SELECT COUNT(*) AS c FROM attendance_records WHERE work_date = ? AND punch_in_at IS NOT NULL")
+        .get(today).c
+    );
+    const late = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM attendance_records WHERE work_date = ? AND status = 'late'").get(today)
+        .c
+    );
+    const absent = Math.max(totalStaff - present, 0);
+    res.json({ date: today, totalStaff, present, late, absent });
   });
 
   router.get("/dashboard/overview", attachUser, (req, res) => {
@@ -2024,6 +2318,75 @@ function createApiRouter(db) {
     }
     res.json({ branches: db.prepare("SELECT * FROM branches ORDER BY name").all() });
   });
+  router.get("/departments", attachUser, (req, res) => {
+    if (!can(req.currentUser, "departments:read") && !can(req.currentUser, "users:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const departments = db
+      .prepare("SELECT id, name, active, created_at FROM departments WHERE active = 1 ORDER BY name")
+      .all();
+    res.json({ departments });
+  });
+  router.post("/departments", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can create departments" });
+    }
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ error: "name required" });
+    try {
+      const info = db
+        .prepare("INSERT INTO departments (name, active) VALUES (?, 1)")
+        .run(name);
+      const department = db
+        .prepare("SELECT id, name, active, created_at FROM departments WHERE id = ?")
+        .get(info.lastInsertRowid);
+      insertAudit(req.currentUser.id, "department_create", "department", department.id, { name });
+      res.json({ department });
+    } catch (e) {
+      if (String(e.message).includes("UNIQUE")) {
+        return res.status(409).json({ error: "Department already exists" });
+      }
+      throw e;
+    }
+  });
+  router.patch("/departments/:id", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can edit departments" });
+    }
+    const id = Number(req.params.id);
+    const name = req.body?.name != null ? String(req.body.name).trim() : null;
+    const active = req.body?.active;
+    db.prepare(
+      `UPDATE departments
+       SET name = COALESCE(?, name),
+           active = CASE WHEN ? IS NULL THEN active ELSE ? END
+       WHERE id = ?`
+    ).run(name, active === undefined ? null : (active ? 1 : 0), active === undefined ? null : (active ? 1 : 0), id);
+    const department = db
+      .prepare("SELECT id, name, active, created_at FROM departments WHERE id = ?")
+      .get(id);
+    if (!department) return res.status(404).json({ error: "Not found" });
+    insertAudit(req.currentUser.id, "department_update", "department", id, {});
+    res.json({ department });
+  });
+  router.delete("/departments/:id", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can delete departments" });
+    }
+    const id = Number(req.params.id);
+    const row = db.prepare("SELECT id, name FROM departments WHERE id = ?").get(id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    db.prepare("UPDATE departments SET active = 0 WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "department_delete", "department", id, { name: row.name });
+    res.json({ ok: true, id });
+  });
+  router.get("/locations", attachUser, (req, res) => {
+    if (!can(req.currentUser, "branches:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const locations = db.prepare("SELECT * FROM branches ORDER BY name").all();
+    res.json({ locations });
+  });
 
   router.post("/branches", attachUser, requirePerm("branches:write"), (req, res) => {
     if (!isOrgWide(req.currentUser)) {
@@ -2101,13 +2464,14 @@ function createApiRouter(db) {
     if (!email || !password || !full_name || !role) {
       return res.status(400).json({ error: "email, password, full_name, role required" });
     }
-    if (!Object.values(ROLES).includes(role)) {
+    const normalizedRole = normalizeRoleInput(role);
+    if (!normalizedRole || !Object.values(ROLES).includes(normalizedRole)) {
       return res.status(400).json({ error: "Invalid role" });
     }
-    if (role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+    if (normalizedRole === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Only Super Admin can create another Super Admin" });
     }
-    const arCheck = assertRoleAssignableOnCreate(req.currentUser, role);
+    const arCheck = assertRoleAssignableOnCreate(req.currentUser, normalizedRole);
     if (!arCheck.ok) return res.status(arCheck.status).json({ error: arCheck.error });
     if (isBranchScoped(req.currentUser)) {
       const bid = branch_id != null ? Number(branch_id) : req.currentUser.branch_id;
@@ -2131,7 +2495,7 @@ function createApiRouter(db) {
           login_id ? String(login_id).trim() : null,
           hash,
           String(full_name).trim(),
-          role,
+          normalizedRole,
           branch_id ? Number(branch_id) : null,
           mobile ? String(mobile) : null,
           department ? String(department) : null,
@@ -2162,7 +2526,7 @@ function createApiRouter(db) {
     }
   });
 
-  router.patch("/users/:id", attachUser, requirePerm("users:update"), (req, res) => {
+  const patchUserHandler = (req, res) => {
     const id = Number(req.params.id);
     const target = db.prepare("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
     if (!target) return res.status(404).json({ error: "Not found" });
@@ -2173,10 +2537,19 @@ function createApiRouter(db) {
     }
     const {
       full_name,
+      login_id,
       branch_id,
       shift_start,
       shift_end,
       grace_minutes,
+      mobile,
+      department,
+      dob,
+      joining_date,
+      address,
+      account_number,
+      ifsc,
+      bank_name,
       active,
       role,
       password,
@@ -2191,7 +2564,11 @@ function createApiRouter(db) {
     if (role && role !== target.role && !isOrgWide(req.currentUser)) {
       return res.status(403).json({ error: "Only Super Admin or Admin may change roles" });
     }
-    if (role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+    const normalizedPatchRole = role ? normalizeRoleInput(role) : null;
+    if (role && !normalizedPatchRole) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+    if (normalizedPatchRole === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Only Super Admin may assign Super Admin role" });
     }
     const branchVal = branch_id === undefined ? null : branch_id;
@@ -2199,7 +2576,16 @@ function createApiRouter(db) {
     db.prepare(
       `UPDATE users SET
         full_name = COALESCE(?, full_name),
+        login_id = COALESCE(?, login_id),
         branch_id = CASE WHEN ? IS NULL THEN branch_id ELSE ? END,
+        mobile = COALESCE(?, mobile),
+        department = COALESCE(?, department),
+        dob = COALESCE(?, dob),
+        joining_date = COALESCE(?, joining_date),
+        address = COALESCE(?, address),
+        account_number = COALESCE(?, account_number),
+        ifsc = COALESCE(?, ifsc),
+        bank_name = COALESCE(?, bank_name),
         shift_start = COALESCE(?, shift_start),
         shift_end = COALESCE(?, shift_end),
         grace_minutes = COALESCE(?, grace_minutes),
@@ -2208,14 +2594,23 @@ function createApiRouter(db) {
        WHERE id = ?`
     ).run(
       full_name || null,
+      login_id || null,
       branchVal,
       branchVal,
+      mobile || null,
+      department || null,
+      dob || null,
+      joining_date || null,
+      address || null,
+      account_number || null,
+      ifsc || null,
+      bank_name || null,
       shift_start || null,
       shift_end || null,
       grace_minutes === undefined ? null : grace_minutes,
       activeVal,
       activeVal,
-      role || null,
+      normalizedPatchRole || null,
       id
     );
     if (allow_gps !== undefined) {
@@ -2236,7 +2631,7 @@ function createApiRouter(db) {
     }
     const u = db
       .prepare(
-        `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active,
+        `SELECT id, email, login_id, full_name, role, branch_id, mobile, department, dob, joining_date, address, account_number, ifsc, bank_name, shift_start, shift_end, grace_minutes, active,
          COALESCE(allow_gps,1) AS allow_gps, COALESCE(allow_face,0) AS allow_face, COALESCE(allow_biometric,0) AS allow_biometric, COALESCE(allow_manual,1) AS allow_manual FROM users WHERE id = ?`
       )
       .get(id);
@@ -2244,6 +2639,29 @@ function createApiRouter(db) {
     scheduleUserSync(db, id);
     appsScriptScheduleUser(db, id);
     res.json({ user: u });
+  };
+  router.patch("/users/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.put("/staff/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.delete("/staff/:id", attachUser, requirePerm("users:update"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    db.prepare("UPDATE users SET active = 0, deleted_at = datetime('now') WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "staff_delete", "user", id, {});
+    res.json({ ok: true, id });
+  });
+  router.post("/staff/:id/photo", attachUser, requirePerm("users:update"), uploadFace.single("photo"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (!req.file) return res.status(400).json({ error: "photo file required" });
+    const photoPath = `/uploads/faces/${req.file.filename}`;
+    db.prepare("UPDATE users SET profile_photo = ? WHERE id = ?").run(photoPath, id);
+    insertAudit(req.currentUser.id, "staff_photo_upload", "user", id, {});
+    res.json({ id, profile_photo: photoPath });
   });
 
   router.get("/timings/me", attachUser, (req, res) => {
@@ -2295,6 +2713,8 @@ function createApiRouter(db) {
          JOIN users u ON u.id = n.created_by
          LEFT JOIN notice_reads nr ON nr.notice_id = n.id AND nr.user_id = ?
          WHERE n.active = 1
+           AND (n.visible_from IS NULL OR datetime(n.visible_from) <= datetime('now'))
+           AND (n.visible_until IS NULL OR datetime(n.visible_until) >= datetime('now'))
          ORDER BY n.created_at DESC
          LIMIT 50`
       )
@@ -2303,14 +2723,74 @@ function createApiRouter(db) {
   });
 
   router.post("/notices", attachUser, requirePerm("notices:write"), (req, res) => {
-    const { title, body } = req.body || {};
+    const { title, body, visible_from, visible_until } = req.body || {};
     if (!title || !body) return res.status(400).json({ error: "title and body required" });
     const info = db
-      .prepare("INSERT INTO notices (title, body, created_by) VALUES (?,?,?)")
-      .run(String(title), String(body), req.currentUser.id);
+      .prepare("INSERT INTO notices (title, body, created_by, visible_from, visible_until) VALUES (?,?,?,?,?)")
+      .run(String(title), String(body), req.currentUser.id, visible_from || null, visible_until || null);
     const n = db.prepare("SELECT * FROM notices WHERE id = ?").get(info.lastInsertRowid);
     appsScriptScheduleNotice(db, info.lastInsertRowid);
     res.json({ notice: n });
+  });
+  router.post("/notices/:id/read", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const n = db.prepare("SELECT id FROM notices WHERE id = ? AND active = 1").get(id);
+    if (!n) return res.status(404).json({ error: "Not found" });
+    db.prepare("INSERT OR REPLACE INTO notice_reads (notice_id, user_id, read_at) VALUES (?,?,datetime('now'))").run(
+      id,
+      req.currentUser.id
+    );
+    res.json({ ok: true });
+  });
+  router.get("/notices/:id/replies", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.notice_id, r.user_id, r.body, r.created_at, u.full_name AS user_name
+         FROM notice_replies r
+         JOIN users u ON u.id = r.user_id
+         WHERE r.notice_id = ?
+         ORDER BY r.id ASC`
+      )
+      .all(id);
+    res.json({ replies: rows });
+  });
+  router.post("/notices/:id/replies", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const body = String(req.body?.body || "").trim();
+    if (!body) return res.status(400).json({ error: "body required" });
+    const n = db.prepare("SELECT id FROM notices WHERE id = ? AND active = 1").get(id);
+    if (!n) return res.status(404).json({ error: "Not found" });
+    const info = db
+      .prepare("INSERT INTO notice_replies (notice_id, user_id, body) VALUES (?,?,?)")
+      .run(id, req.currentUser.id, body);
+    const row = db
+      .prepare(
+        `SELECT r.id, r.notice_id, r.user_id, r.body, r.created_at, u.full_name AS user_name
+         FROM notice_replies r JOIN users u ON u.id = r.user_id WHERE r.id = ?`
+      )
+      .get(info.lastInsertRowid);
+    res.json({ reply: row });
+  });
+  router.get("/notices/:id/stats", attachUser, requirePerm("notices:write"), (req, res) => {
+    const id = Number(req.params.id);
+    const notice = db.prepare("SELECT id, title FROM notices WHERE id = ?").get(id);
+    if (!notice) return res.status(404).json({ error: "Not found" });
+    const readCount = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM notice_reads WHERE notice_id = ?").get(id).c
+    );
+    const replyCount = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM notice_replies WHERE notice_id = ?").get(id).c
+    );
+    const reads = db
+      .prepare(
+        `SELECT nr.user_id, nr.read_at, u.full_name
+         FROM notice_reads nr JOIN users u ON u.id = nr.user_id
+         WHERE nr.notice_id = ?
+         ORDER BY nr.read_at DESC LIMIT 200`
+      )
+      .all(id);
+    res.json({ notice, readCount, replyCount, reads });
   });
 
   router.get("/settings", attachUser, (req, res) => {
@@ -2318,6 +2798,33 @@ function createApiRouter(db) {
       return res.status(403).json({ error: "Forbidden" });
     }
     res.json(readAppSettings());
+  });
+  router.get("/attendance/wifi-config", attachUser, (req, res) => {
+    if (!can(req.currentUser, "settings:read")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const s = readAppSettings();
+    res.json(s.attendance_wifi || { enabled: false, allowed_ssids: [] });
+  });
+  router.patch("/attendance/wifi-config", attachUser, requirePerm("settings:write"), (req, res) => {
+    const cur = readAppSettings();
+    const enabled = !!req.body?.enabled;
+    const ssids = Array.isArray(req.body?.allowed_ssids)
+      ? req.body.allowed_ssids.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    const next = {
+      ...cur,
+      attendance_wifi: {
+        enabled,
+        allowed_ssids: ssids,
+      },
+    };
+    writeAppSettings(next);
+    insertAudit(req.currentUser.id, "attendance_wifi_update", "settings", "attendance_wifi", {
+      enabled,
+      count: ssids.length,
+    });
+    res.json(next.attendance_wifi);
   });
 
   router.patch("/settings", attachUser, requirePerm("settings:write"), (req, res) => {
@@ -2331,6 +2838,41 @@ function createApiRouter(db) {
     writeAppSettings(next);
     insertAudit(req.currentUser.id, "settings_update", "settings", "app", { keys: Object.keys(body) });
     res.json(readAppSettings());
+  });
+  router.get("/settings/daily-report", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can view report recipients" });
+    }
+    const s = readAppSettings();
+    res.json(
+      s.daily_report || {
+        enabled: true,
+        recipients: ["contact@prakritiherbs.in", "mkhirnval@gmail.com"],
+      }
+    );
+  });
+  router.patch("/settings/daily-report", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can edit report recipients" });
+    }
+    const cur = readAppSettings();
+    const recipients = Array.isArray(req.body?.recipients)
+      ? req.body.recipients.map((x) => String(x).trim()).filter(Boolean)
+      : (cur.daily_report?.recipients || []);
+    const enabled = req.body?.enabled == null ? !!cur.daily_report?.enabled : !!req.body.enabled;
+    const next = {
+      ...cur,
+      daily_report: {
+        enabled,
+        recipients,
+      },
+    };
+    writeAppSettings(next);
+    insertAudit(req.currentUser.id, "daily_report_settings_update", "settings", "daily_report", {
+      enabled,
+      recipientsCount: recipients.length,
+    });
+    res.json(next.daily_report);
   });
 
   router.get("/hr/alerts", attachUser, (req, res) => {
@@ -2374,6 +2916,72 @@ function createApiRouter(db) {
     res.json({ logs: rows });
   });
 
+  router.get("/trash/users", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, full_name, login_id, email, mobile, role, deleted_at
+         FROM users
+         WHERE deleted_at IS NOT NULL
+         ORDER BY datetime(deleted_at) DESC
+         LIMIT 1000`
+      )
+      .all();
+    res.json({ users: rows });
+  });
+
+  router.post("/trash/users/:id/restore", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const id = Number(req.params.id);
+    const row = db.prepare("SELECT id FROM users WHERE id = ? AND deleted_at IS NOT NULL").get(id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    db.prepare("UPDATE users SET deleted_at = NULL, active = 1 WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "staff_restore", "user", id, {});
+    res.json({ ok: true, id });
+  });
+
+  router.get("/trash/retention", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    res.json({
+      mode: String(process.env.TRASH_RETENTION_MODE || "days"),
+      days: Number(process.env.TRASH_RETENTION_DAYS || 30),
+      minutes: Number(process.env.TRASH_RETENTION_MINUTES || 30),
+    });
+  });
+
+  router.patch("/trash/retention", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const mode = String(req.body?.mode || process.env.TRASH_RETENTION_MODE || "days").toLowerCase();
+    const days = Number(req.body?.days ?? process.env.TRASH_RETENTION_DAYS ?? 30);
+    const minutes = Number(req.body?.minutes ?? process.env.TRASH_RETENTION_MINUTES ?? 30);
+    if (mode !== "days" && mode !== "minutes") {
+      return res.status(400).json({ error: "mode must be days or minutes" });
+    }
+    process.env.TRASH_RETENTION_MODE = mode;
+    process.env.TRASH_RETENTION_DAYS = String(Number.isFinite(days) && days > 0 ? Math.floor(days) : 30);
+    process.env.TRASH_RETENTION_MINUTES = String(
+      Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : 30
+    );
+    insertAudit(req.currentUser.id, "trash_retention_update", "settings", "trash_retention", {
+      mode: process.env.TRASH_RETENTION_MODE,
+      days: process.env.TRASH_RETENTION_DAYS,
+      minutes: process.env.TRASH_RETENTION_MINUTES,
+    });
+    res.json({
+      mode: process.env.TRASH_RETENTION_MODE,
+      days: Number(process.env.TRASH_RETENTION_DAYS),
+      minutes: Number(process.env.TRASH_RETENTION_MINUTES),
+    });
+  });
+
   router.get("/attendance/live-status", attachUser, (req, res) => {
     if (!can(req.currentUser, "attendance:read_all") && !can(req.currentUser, "history:read")) {
       return res.status(403).json({ error: "Forbidden" });
@@ -2391,7 +2999,7 @@ function createApiRouter(db) {
     res.json({ date: today, currently_in: rows });
   });
 
-  router.get("/employees", attachUser, (req, res) => {
+  function listEmployeesHandler(req, res) {
     const mapRow = (r) => ({
       id: r.id,
       name: r.full_name,
@@ -2402,6 +3010,14 @@ function createApiRouter(db) {
       email: r.email,
       branch_id: r.branch_id,
       login_id: r.login_id ?? null,
+      profile_photo: r.profile_photo || null,
+      dob: r.dob || null,
+      joining_date: r.joining_date || null,
+      address: r.address || null,
+      account_number: r.account_number || null,
+      ifsc: r.ifsc || null,
+      bank_name: r.bank_name || null,
+      document_count: Number(r.document_count || 0),
       active: r.active,
       allow_gps: r.allow_gps,
       allow_face: r.allow_face,
@@ -2413,62 +3029,89 @@ function createApiRouter(db) {
     if (can(req.currentUser, "users:read")) {
       const rows = db
         .prepare(
-          `SELECT id, full_name, email, login_id, role, branch_id, mobile, department, active, shift_start, shift_end, grace_minutes,
+          `SELECT id, full_name, email, login_id, role, branch_id, mobile, department, active, shift_start, shift_end, grace_minutes, profile_photo, dob, joining_date, address, account_number, ifsc, bank_name,
+           (SELECT COUNT(*) FROM employee_documents d WHERE d.user_id = users.id) AS document_count,
            COALESCE(allow_gps,1) AS allow_gps, COALESCE(allow_face,0) AS allow_face, COALESCE(allow_manual,1) AS allow_manual
-           FROM users ORDER BY full_name`
+           FROM users WHERE deleted_at IS NULL ORDER BY full_name`
         )
         .all();
       return res.json({ employees: rows.map(mapRow) });
     }
     const self = db
       .prepare(
-        `SELECT id, full_name, email, login_id, role, branch_id, mobile, department, active, shift_start, shift_end, grace_minutes,
+        `SELECT id, full_name, email, login_id, role, branch_id, mobile, department, active, shift_start, shift_end, grace_minutes, profile_photo, dob, joining_date, address, account_number, ifsc, bank_name,
+         (SELECT COUNT(*) FROM employee_documents d WHERE d.user_id = users.id) AS document_count,
          COALESCE(allow_gps,1) AS allow_gps, COALESCE(allow_face,0) AS allow_face, COALESCE(allow_manual,1) AS allow_manual
-         FROM users WHERE id = ?`
+         FROM users WHERE id = ? AND deleted_at IS NULL`
       )
       .get(req.currentUser.id);
     if (!self) {
       return res.status(404).json({ error: "Not found" });
     }
     return res.json({ employees: [mapRow(self)] });
-  });
+  }
 
-  router.post("/employees", attachUser, requirePerm("users:create"), (req, res) => {
-    const { name, mobile, password, role, department, email } = req.body || {};
+  router.get("/employees", attachUser, listEmployeesHandler);
+  router.get("/staff", attachUser, listEmployeesHandler);
+
+  function createEmployeeHandler(req, res) {
+    const { name, mobile, password, role, staff_sub_type, department, email, login_id, dob, joining_date, address, account_number, ifsc, bank_name, branch_id } =
+      req.body || {};
     if (!name || !password) {
       return res.status(400).json({ error: "name and password required" });
     }
-    const mapped = mapIncomingRole(role);
+    const mapped = normalizeRoleInput(role);
     if (!mapped) {
-      return res.status(400).json({ error: "role must be admin or staff" });
+      return res.status(400).json({ error: "role must be valid role id" });
+    }
+    const roleCreateCheck = assertRoleAssignableOnCreate(req.currentUser, mapped);
+    if (!roleCreateCheck.ok) return res.status(roleCreateCheck.status).json({ error: roleCreateCheck.error });
+    const branchId =
+      branch_id != null && branch_id !== ""
+        ? Number(branch_id)
+        : req.currentUser.branch_id != null
+          ? req.currentUser.branch_id
+          : null;
+    if (isBranchScoped(req.currentUser) && Number(req.currentUser.branch_id) !== Number(branchId)) {
+      return res.status(403).json({ error: "Users must be assigned to your branch" });
     }
     const em =
       email && String(email).trim()
         ? String(email).trim()
         : `emp${Date.now()}@prakriti.local`;
+    const loginId =
+      login_id && String(login_id).trim()
+        ? String(login_id).trim()
+        : generateBranchEmployeeId(branchId);
     const hash = bcrypt.hashSync(String(password), 10);
     try {
       const info = db
         .prepare(
-          `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, mobile, department, shift_start, shift_end, grace_minutes)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+          `INSERT INTO users (email, login_id, password_hash, full_name, role, branch_id, mobile, department, dob, joining_date, address, account_number, ifsc, bank_name, shift_start, shift_end, grace_minutes)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
         )
         .run(
           em,
-          null,
+          loginId,
           hash,
           String(name).trim(),
           mapped,
-          req.currentUser.branch_id != null ? req.currentUser.branch_id : null,
+          branchId,
           mobile ? String(mobile) : null,
-          department ? String(department) : null,
+          department ? String(department) : staff_sub_type ? String(staff_sub_type) : null,
+          dob ? String(dob) : null,
+          joining_date ? String(joining_date) : null,
+          address ? String(address) : null,
+          account_number ? String(account_number) : null,
+          ifsc ? String(ifsc) : null,
+          bank_name ? String(bank_name) : null,
           "09:00",
           "18:00",
           15
         );
       const u = db
         .prepare(
-          "SELECT id, email, login_id, full_name, role, branch_id, mobile, department FROM users WHERE id = ?"
+          "SELECT id, email, login_id, full_name, role, branch_id, mobile, department, dob, joining_date, address, account_number, ifsc, bank_name FROM users WHERE id = ?"
         )
         .get(info.lastInsertRowid);
       insertAudit(req.currentUser.id, "employee_create", "user", u.id, { email: u.email });
@@ -2483,6 +3126,13 @@ function createApiRouter(db) {
           department: u.department,
           mobile: u.mobile,
           email: u.email,
+          login_id: u.login_id,
+          dob: u.dob,
+          joining_date: u.joining_date,
+          address: u.address,
+          account_number: u.account_number,
+          ifsc: u.ifsc,
+          bank_name: u.bank_name,
         },
       });
     } catch (e) {
@@ -2491,6 +3141,55 @@ function createApiRouter(db) {
       }
       throw e;
     }
+  }
+
+  router.post("/employees", attachUser, requirePerm("users:create"), createEmployeeHandler);
+  router.post("/staff", attachUser, requirePerm("users:create"), createEmployeeHandler);
+
+  router.get("/crm/leads", attachUser, (req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT l.id, l.full_name, l.phone, l.email, l.company, l.status, l.notes, l.created_at,
+                u.full_name AS created_by_name
+         FROM crm_leads l
+         LEFT JOIN users u ON u.id = l.created_by
+         ORDER BY l.id DESC
+         LIMIT 500`
+      )
+      .all();
+    res.json({ leads: rows });
+  });
+
+  router.post("/crm/leads", attachUser, (req, res) => {
+    const { full_name, phone, email, company, status, notes } = req.body || {};
+    if (!full_name || !String(full_name).trim()) {
+      return res.status(400).json({ error: "full_name required" });
+    }
+    const info = db
+      .prepare(
+        `INSERT INTO crm_leads (full_name, phone, email, company, status, notes, created_by)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        String(full_name).trim(),
+        phone ? String(phone).trim() : null,
+        email ? String(email).trim() : null,
+        company ? String(company).trim() : null,
+        status && String(status).trim() ? String(status).trim() : "new",
+        notes != null ? String(notes) : null,
+        req.currentUser.id
+      );
+    const row = db
+      .prepare(
+        `SELECT l.id, l.full_name, l.phone, l.email, l.company, l.status, l.notes, l.created_at,
+                u.full_name AS created_by_name
+         FROM crm_leads l
+         LEFT JOIN users u ON u.id = l.created_by
+         WHERE l.id = ?`
+      )
+      .get(info.lastInsertRowid);
+    insertAudit(req.currentUser.id, "crm_lead_create", "crm_lead", row.id, { full_name: row.full_name });
+    res.json({ lead: row });
   });
 
   router.get("/logs", attachUser, (req, res) => {
@@ -2554,17 +3253,112 @@ function createApiRouter(db) {
       note: "Use Authorization: Bearer token for downloads. PDF/XLSX/CSV supported.",
     });
   });
+  router.get("/mobile/apk", attachUser, (req, res) => {
+    const apkUrl = process.env.APK_DOWNLOAD_URL || "/downloads/hrms-app.apk";
+    res.json({ apk_url: apkUrl, note: "Download and install HRMS APK on Android devices." });
+  });
+  router.get("/warnings/me", attachUser, (req, res) => {
+    const u = req.currentUser;
+    const today = todayLocalDate();
+    const month = today.slice(0, 7);
+    const rows = [];
+    const todayRec = db
+      .prepare("SELECT status, punch_in_at, punch_out_at FROM attendance_records WHERE user_id = ? AND work_date = ?")
+      .get(u.id, today);
+    if (todayRec?.status === "late") {
+      rows.push({ type: "attendance", severity: "warning", message: "Aaj aap late mark hue hain." });
+    }
+    if (todayRec?.punch_in_at && !todayRec?.punch_out_at) {
+      rows.push({ type: "attendance", severity: "warning", message: "Aaj ka punch-out pending hai." });
+    }
+    const approvedLeaves = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM leave_requests WHERE user_id = ? AND final_status = 'APPROVED'").get(u.id).c
+    );
+    if (approvedLeaves >= 2) {
+      rows.push({
+        type: "leave",
+        severity: approvedLeaves >= 4 ? "critical" : "warning",
+        message:
+          approvedLeaves >= 4
+            ? `Aapki ${approvedLeaves} leaves approve ho chuki hain. Ab salary deduction apply ho sakta hai.`
+            : `Aapki ${approvedLeaves} leave use ho chuki hain.`,
+      });
+    }
+    const payrollRow = db
+      .prepare(
+        `SELECT COALESCE(deductions_inr,0) AS d FROM payroll_entries WHERE user_id = ? AND period = ? ORDER BY id DESC LIMIT 1`
+      )
+      .get(u.id, month);
+    if (Number(payrollRow?.d || 0) > 0) {
+      rows.push({
+        type: "payroll",
+        severity: "warning",
+        message: `Is month aapki payroll deduction Rs ${Math.round(Number(payrollRow.d))} hai.`,
+      });
+    }
+    res.json({ warnings: rows });
+  });
+  router.get("/warnings/overview", attachUser, (req, res) => {
+    if (
+      req.currentUser.role !== ROLES.SUPER_ADMIN &&
+      req.currentUser.role !== ROLES.ADMIN &&
+      req.currentUser.role !== ROLES.ATTENDANCE_MANAGER
+    ) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const lateToday = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM attendance_records WHERE work_date = ? AND status = 'late'").get(todayLocalDate()).c
+    );
+    const missedPunchOut = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM attendance_records WHERE work_date = ? AND punch_in_at IS NOT NULL AND punch_out_at IS NULL").get(todayLocalDate()).c
+    );
+    const leaveHeavyUsers = db
+      .prepare(
+        `SELECT u.id, u.full_name, COUNT(*) AS approved_count
+         FROM leave_requests lr JOIN users u ON u.id = lr.user_id
+         WHERE lr.final_status = 'APPROVED'
+         GROUP BY u.id
+         HAVING approved_count >= 2
+         ORDER BY approved_count DESC
+         LIMIT 20`
+      )
+      .all();
+    res.json({ lateToday, missedPunchOut, leaveHeavyUsers });
+  });
+
+  function employeeDateFilterClause(req) {
+    const mode = String(req.query.date_filter || "all").toLowerCase();
+    if (mode === "today") {
+      const d = todayLocalDate();
+      return { sql: " AND date(created_at) = ?", params: [d], tag: d };
+    }
+    if (mode === "yesterday") {
+      const t = new Date();
+      t.setDate(t.getDate() - 1);
+      const d = t.toISOString().slice(0, 10);
+      return { sql: " AND date(created_at) = ?", params: [d], tag: d };
+    }
+    if (mode === "custom") {
+      const from = String(req.query.from || "").slice(0, 10);
+      const to = String(req.query.to || "").slice(0, 10);
+      if (from && to) return { sql: " AND date(created_at) BETWEEN ? AND ?", params: [from, to], tag: `${from}_${to}` };
+    }
+    return { sql: "", params: [], tag: "all" };
+  }
+
+  function employeeExportRows(req) {
+    const f = employeeDateFilterClause(req);
+    const sql = `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at, mobile, department, dob, joining_date, address, account_number, ifsc, bank_name
+         FROM users WHERE deleted_at IS NULL${f.sql} ORDER BY full_name`;
+    const rows = db.prepare(sql).all(...f.params);
+    return { rows, tag: f.tag };
+  }
 
   router.get("/employees/export.csv", attachUser, (req, res) => {
     if (!can(req.currentUser, "users:read") || !can(req.currentUser, "export:read")) {
       return res.status(403).send("Forbidden");
     }
-    const rows = db
-      .prepare(
-        `SELECT id, email, login_id, full_name, role, branch_id, shift_start, shift_end, grace_minutes, active, created_at, mobile, department
-         FROM users ORDER BY full_name`
-      )
-      .all();
+    const { rows, tag } = employeeExportRows(req);
     const headers = [
       "id",
       "email",
@@ -2579,6 +3373,12 @@ function createApiRouter(db) {
       "created_at",
       "mobile",
       "department",
+      "dob",
+      "joining_date",
+      "address",
+      "account_number",
+      "ifsc",
+      "bank_name",
     ];
     const esc = (v) => {
       if (v == null) return '""';
@@ -2590,8 +3390,101 @@ function createApiRouter(db) {
       lines.push(headers.map((h) => esc(r[h])).join(","));
     }
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="employees.csv"');
+    res.setHeader("Content-Disposition", `attachment; filename="employees-${tag}.csv"`);
     res.send(lines.join("\n"));
+  });
+
+  router.get("/employees/export.xlsx", attachUser, async (req, res, next) => {
+    try {
+      if (!can(req.currentUser, "users:read") || !can(req.currentUser, "export:read")) {
+        return res.status(403).send("Forbidden");
+      }
+      const { rows, tag } = employeeExportRows(req);
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Employees");
+      const headers = ["ID", "Employee ID", "Name", "Role", "Branch", "Mobile", "Email", "DOB", "Joining Date", "Address", "Account Number", "IFSC", "Bank Name", "Created At"];
+      ws.addRow(headers);
+      rows.forEach((r) => {
+        ws.addRow([r.id, r.login_id || "", r.full_name, r.role, r.branch_id ?? "", r.mobile || "", r.email || "", r.dob || "", r.joining_date || "", r.address || "", r.account_number || "", r.ifsc || "", r.bank_name || "", r.created_at || ""]);
+      });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename=\"employees-${tag}.xlsx\"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  router.get("/employees/export.pdf", attachUser, (req, res) => {
+    if (!can(req.currentUser, "users:read") || !can(req.currentUser, "export:read")) {
+      return res.status(403).send("Forbidden");
+    }
+    const { rows, tag } = employeeExportRows(req);
+    const doc = new PDFDocument({ size: "A4", margin: 36 });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename=\"employees-${tag}.pdf\"`);
+    doc.pipe(res);
+    doc.fontSize(14).text(`Employees Export (${tag})`);
+    doc.moveDown(0.5);
+    rows.slice(0, 500).forEach((r, idx) => {
+      doc.fontSize(9).text(`${idx + 1}. ${r.full_name} | ${r.login_id || "-"} | ${r.mobile || "-"} | ${r.role} | ${r.branch_id || "-"}`);
+    });
+    doc.end();
+  });
+  router.get("/system/export.xlsx", attachUser, (req, res, next) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can export full system data" });
+    }
+    try {
+      const wb = new ExcelJS.Workbook();
+      const sheets = [
+        ["Employees", "SELECT id, full_name, email, login_id, role, branch_id, mobile, department, active, created_at FROM users WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 5000"],
+        ["Attendance", "SELECT id, user_id, work_date, status, punch_in_at, punch_out_at, punch_method_in, punch_method_out, verification_in, verification_out FROM attendance_records ORDER BY id DESC LIMIT 10000"],
+        ["Payroll", "SELECT id, user_id, period, gross_inr, deductions_inr, net_inr, notes, created_at FROM payroll_entries ORDER BY id DESC LIMIT 10000"],
+        ["Leaves", "SELECT id, user_id, start_date, end_date, reason, final_status, manager_review, admin_review, created_at FROM leave_requests ORDER BY id DESC LIMIT 10000"],
+        ["Documents", "SELECT id, user_id, doc_type, file_name, file_path, verified, created_at FROM employee_documents ORDER BY id DESC LIMIT 10000"],
+      ];
+      for (const [name, sql] of sheets) {
+        const ws = wb.addWorksheet(name);
+        const rows = db.prepare(sql).all();
+        if (rows.length) {
+          ws.columns = Object.keys(rows[0]).map((k) => ({ header: k, key: k }));
+          rows.forEach((r) => ws.addRow(r));
+        } else {
+          ws.addRow(["No data"]);
+        }
+      }
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="full-system-${todayLocalDate()}.xlsx"`);
+      wb.xlsx.write(res).then(() => res.end()).catch(next);
+    } catch (e) {
+      next(e);
+    }
+  });
+  router.get("/system/export.pdf", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only Super Admin can export full system data" });
+    }
+    const totals = {
+      employees: Number(db.prepare("SELECT COUNT(*) AS c FROM users WHERE deleted_at IS NULL").get().c),
+      attendance: Number(db.prepare("SELECT COUNT(*) AS c FROM attendance_records").get().c),
+      payroll: Number(db.prepare("SELECT COUNT(*) AS c FROM payroll_entries").get().c),
+      leaves: Number(db.prepare("SELECT COUNT(*) AS c FROM leave_requests").get().c),
+      documents: Number(db.prepare("SELECT COUNT(*) AS c FROM employee_documents").get().c),
+    };
+    const doc = new PDFDocument({ margin: 36, size: "A4" });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="full-system-${todayLocalDate()}.pdf"`);
+    doc.pipe(res);
+    doc.fontSize(16).text("Prakriti HRMS - Full System Export");
+    doc.moveDown(0.5);
+    doc.fontSize(10).text(`Generated: ${new Date().toISOString()}`);
+    doc.moveDown();
+    Object.entries(totals).forEach(([k, v]) => doc.text(`${k}: ${v}`));
+    doc.moveDown();
+    doc.text("Use XLSX export for full row-level data.");
+    doc.end();
   });
 
   router.get("/reports/monthly.csv", attachUser, (req, res) => {

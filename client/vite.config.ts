@@ -7,10 +7,10 @@ const API_TARGET = `http://127.0.0.1:${API_PORT}`
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: '/app/',
+  base: '/',
   build: {
-    /** Standard deploy output: repo root `dist/app/` (see server.js STATIC_APP_DIR). */
-    outDir: '../dist/app',
+    /** Replit / production: repo root `dist/` (see server.js STATIC_APP_DIR). */
+    outDir: '../dist',
     emptyOutDir: true,
   },
   server: {

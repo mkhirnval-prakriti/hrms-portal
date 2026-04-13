@@ -1,6 +1,6 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
 #
-# ONE Web Service: API + React SPA (/app) + legacy portal (/portal). Same origin for sessions.
+# ONE Web Service: API + React SPA (/) + legacy portal (/portal). Same origin for sessions.
 #
 # Persistent disks require a paid instance type (not Free). Adjust `plan` if needed.
 services:
@@ -32,8 +32,9 @@ services:
       #   sync: false
       - key: INTEGRATION_SECRET
         generateValue: true
-      - key: GOOGLE_APPS_SCRIPT_WEBAPP_URL
-        value: https://script.google.com/macros/s/AKfycbzARaUpHTiKlq37VAzK_4KrvwjE-H7x2tgfOuwFQK2WJUTqa0840LMshKdkx_j3RvmD/exec
+      # Optional outbound sync — set in the Render dashboard if you use Apps Script.
+      # - key: GOOGLE_APPS_SCRIPT_WEBAPP_URL
+      #   sync: false
       # Add in Render dashboard after first deploy (use your real service URL):
       # GOOGLE_OAUTH_REDIRECT_URI = https://hrms-portal.onrender.com/api/integrations/google/oauth/callback
       # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
