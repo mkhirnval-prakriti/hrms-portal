@@ -4,6 +4,13 @@ import { api, apiFetchUrl, getToken } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
 
+function localDateInputValue(d: Date) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 type ReportsPayload = {
   generatedAt: string
   exports: Record<string, string>
@@ -45,6 +52,7 @@ export function ReportsPage() {
   const now = useMemo(() => new Date(), [])
   const [year, setYear] = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth() + 1)
+  const [reportDay, setReportDay] = useState(() => localDateInputValue(now))
 
   const canAccess = !!(user && (canPerm(user, 'export:read') || canPerm(user, 'dashboard:read')))
   const canEmployees = !!(user && canPerm(user, 'users:read') && canPerm(user, 'export:read'))
@@ -66,15 +74,34 @@ export function ReportsPage() {
     )
   }
 
-  const attendanceLinks: { key: keyof ReportsPayload['exports'] | string; label: string }[] = [
+  /** Keys from `GET /api/reports` — PDF/XLSX handlers live in `server/productRoutes.js`. */
+  const attendanceLinks: { key: string; label: string }[] = [
     { key: 'attendanceCsv', label: 'Attendance (CSV)' },
     { key: 'attendanceXlsx', label: 'Attendance (Excel)' },
     { key: 'monthlyCsv', label: 'Monthly attendance (CSV)' },
     { key: 'monthlyPdf', label: 'Monthly summary (PDF)' },
     { key: 'monthlyAttendanceXlsx', label: 'Monthly attendance (Excel)' },
-    { key: 'dailyPdf', label: 'Daily (PDF)' },
-    { key: 'dailyXlsx', label: 'Daily (Excel)' },
+    { key: 'dailyPdf', label: 'Daily summary (PDF)' },
+    { key: 'dailyXlsx', label: 'Daily summary (Excel)' },
   ]
+
+  function canDownloadAttendanceExport(key: string) {
+    if (!user) return false
+    const exportOk = canPerm(user, 'export:read')
+    const dashOk = canPerm(user, 'dashboard:read')
+    if (key === 'dailyPdf' || key === 'dailyXlsx') return exportOk || dashOk
+    return exportOk
+  }
+
+  function resolveAttendancePath(key: string, exports: ReportsPayload['exports']) {
+    const base = exports[key]
+    if (!base) return ''
+    if (key === 'dailyPdf' || key === 'dailyXlsx') {
+      const sep = base.includes('?') ? '&' : '?'
+      return `${base}${sep}date=${encodeURIComponent(reportDay)}`
+    }
+    return base
+  }
 
   const otherLinks: { key: string; label: string }[] = [
     { key: 'leaveCsv', label: 'Leaves (CSV)' },
@@ -138,16 +165,26 @@ export function ReportsPage() {
 
           <section className="ph-card space-y-4 rounded-2xl p-6">
             <h2 className="text-lg font-semibold text-[#1f5e3b]">Attendance reports</h2>
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-[#1f5e3b]">Date for daily PDF / Excel</span>
+              <input
+                type="date"
+                className="rounded-xl border border-[#1f5e3b]/20 px-3 py-2 text-sm"
+                value={reportDay}
+                max={localDateInputValue(new Date())}
+                onChange={(e) => setReportDay(e.target.value || reportDay)}
+              />
+            </label>
             <div className="flex flex-wrap gap-2">
               {attendanceLinks.map(({ key, label }) => {
-                const path = data.exports[key as keyof typeof data.exports]
+                const path = resolveAttendancePath(key, data.exports)
                 if (!path) return null
                 return (
                   <button
                     key={key}
                     type="button"
                     className="rounded-xl bg-[#1f5e3b] px-4 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-105 disabled:opacity-50"
-                    disabled={!user || !canPerm(user, 'export:read')}
+                    disabled={!canDownloadAttendanceExport(key)}
                     onClick={() => handleDownload(path, label)}
                   >
                     {label}
@@ -155,8 +192,13 @@ export function ReportsPage() {
                 )
               })}
             </div>
-            {user && !canPerm(user, 'export:read') && (
-              <p className="text-xs text-amber-800">Export permission required for downloads.</p>
+            {user && !canPerm(user, 'export:read') && canPerm(user, 'dashboard:read') && (
+              <p className="text-xs text-[#1f5e3b]/80">
+                Daily summary downloads are available with dashboard access. Raw attendance CSV/Excel and monthly files need export permission.
+              </p>
+            )}
+            {user && !canPerm(user, 'export:read') && !canPerm(user, 'dashboard:read') && (
+              <p className="text-xs text-amber-800">You do not have permission to download these files.</p>
             )}
           </section>
 
@@ -195,14 +237,16 @@ export function ReportsPage() {
               {otherLinks.map(({ key, label }) => {
                 const path = data.exports[key as keyof typeof data.exports]
                 if (!path) return null
+                if (key === 'leaveCsv' && (!user || (!canPerm(user, 'leave:read_all') && !canPerm(user, 'leave:read_self'))))
+                  return null
                 const needDocs = key === 'documentsXlsx'
-                if (needDocs && (!user || !canPerm(user, 'documents:read_all'))) return null
-                const needPayroll = key === 'payrollXlsx'
                 if (
-                  needPayroll &&
-                  (!user || (!canPerm(user, 'payroll:read') && !canPerm(user, 'payroll:read_self')))
+                  needDocs &&
+                  (!user || (!canPerm(user, 'documents:read_all') && !canPerm(user, 'documents:verify')))
                 )
                   return null
+                const needPayroll = key === 'payrollXlsx'
+                if (needPayroll && (!user || !canPerm(user, 'payroll:read'))) return null
                 return (
                   <button
                     key={key}
