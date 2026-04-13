@@ -65,12 +65,17 @@ function localMinutesFromDate(iso) {
 }
 
 function jwtSecret() {
-  const s = process.env.JWT_SECRET || process.env.SESSION_SECRET;
+  let s = String(process.env.JWT_SECRET || "").trim();
+  if (!s) s = String(process.env.SESSION_SECRET || "").trim();
   if (s) return s;
+  const v = crypto.randomBytes(48).toString("hex");
+  process.env.JWT_SECRET = v;
   if (process.env.NODE_ENV === "production") {
-    throw new Error("JWT_SECRET or SESSION_SECRET must be set in production");
+    console.warn(
+      "[hrms] jwtSecret: JWT_SECRET and SESSION_SECRET were empty — generated ephemeral JWT secret (set secrets for stable tokens)."
+    );
   }
-  return "dev-insecure-change-me";
+  return v;
 }
 
 function signJwt(user) {

@@ -1,10 +1,29 @@
 require("dotenv").config();
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
+
+/** Replit / zero-config: never require manual secrets (warn in production). */
+function ensureRuntimeSecret(name, byteLength, label) {
+  const existing = String(process.env[name] || "").trim();
+  if (existing) return existing;
+  const generated = crypto.randomBytes(byteLength).toString("hex");
+  process.env[name] = generated;
+  if (process.env.NODE_ENV === "production") {
+    console.warn(
+      `[hrms] ${label}: ${name} was not set — auto-generated. Logins stay valid until restart; set ${name} in Replit Secrets for stable sessions/tokens.`
+    );
+  }
+  return generated;
+}
+
+ensureRuntimeSecret("SESSION_SECRET", 32, "Security");
+ensureRuntimeSecret("JWT_SECRET", 48, "Security");
+
 const { openDb } = require("./server/db");
 const { createApiRouter } = require("./server/api");
 const { runStartupSmokeTest } = require("./server/appsScriptSync");
@@ -21,11 +40,6 @@ if (effectivePort == null) {
   process.exit(1);
 }
 const HOST = process.env.HOST || "0.0.0.0";
-
-if (process.env.NODE_ENV === "production" && !String(process.env.SESSION_SECRET || "").trim()) {
-  console.error("FATAL: SESSION_SECRET is required when NODE_ENV=production (see .env.example).");
-  process.exit(1);
-}
 
 /**
  * CORS: set ALLOWED_ORIGINS to a comma-separated list of allowed browser origins.
@@ -122,7 +136,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(
   session({
     name: "hrms.sid",
-    secret: process.env.SESSION_SECRET || "dev-secret-change-me",
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
