@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import { api, apiFetchUrl, getToken } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { canPerm } from '../lib/permissions'
@@ -62,6 +63,8 @@ type DocRow = {
 }
 
 export function EmployeesPage() {
+  const params = useParams()
+  const selectedEmployeeId = Number(params.id || 0) || null
   const { user } = useAuth()
   const [list, setList] = useState<Emp[]>([])
   const [branches, setBranches] = useState<Branch[]>([])
@@ -118,6 +121,7 @@ export function EmployeesPage() {
   const [editAllowManual, setEditAllowManual] = useState(true)
   const [editAllowFingerprint, setEditAllowFingerprint] = useState(false)
   const [editPassword, setEditPassword] = useState('')
+  const [securityMsg, setSecurityMsg] = useState('')
 
   const [viewMode, setViewMode] = useState<'table' | 'cards'>(() => {
     try {
@@ -127,6 +131,9 @@ export function EmployeesPage() {
       return 'table'
     }
   })
+  const [highlightEmployeeId, setHighlightEmployeeId] = useState<number | null>(null)
+  const [lastAutoOpenedId, setLastAutoOpenedId] = useState<number | null>(null)
+  const [autoOpenRetries, setAutoOpenRetries] = useState<Record<number, number>>({})
 
   const branchById = useMemo(() => {
     const m = new Map<number, string>()
@@ -177,11 +184,42 @@ export function EmployeesPage() {
     void refresh()
   }, [refresh])
 
+  useEffect(() => {
+    if (!selectedEmployeeId || loading) return
+    if (lastAutoOpenedId === selectedEmployeeId) return
+    const target = list.find((emp) => Number(emp.id) === Number(selectedEmployeeId))
+    if (!target) {
+      const retries = autoOpenRetries[selectedEmployeeId] || 0
+      if (retries < 2) {
+        setAutoOpenRetries((prev) => ({ ...prev, [selectedEmployeeId]: retries + 1 }))
+        void refresh()
+      }
+      return
+    }
+    setHighlightEmployeeId(target.id)
+    window.setTimeout(() => {
+      const row = document.getElementById(`emp-row-${target.id}`)
+      if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      else {
+        const card = document.getElementById(`emp-card-${target.id}`)
+        card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    }, 80)
+    if (canUpdate) {
+      openEdit(target)
+    }
+    setAutoOpenRetries((prev) => ({ ...prev, [selectedEmployeeId]: 99 }))
+    setLastAutoOpenedId(selectedEmployeeId)
+  }, [selectedEmployeeId, loading, list, canUpdate, lastAutoOpenedId, autoOpenRetries, refresh])
+
   async function createEmp(e: React.FormEvent) {
     e.preventDefault()
     setErr(null)
     try {
-      await api('/employees', {
+      if (!mobile.trim()) throw new Error('Mobile is required')
+      if (createBranch === '') throw new Error('Branch is required')
+      console.log('[employees.create] sending request', { name, role: roleSimple, branch_id: createBranch })
+      const created = await api<{ employee?: Emp; user?: Emp }>('/employees', {
         method: 'POST',
         body: JSON.stringify({
           name,
@@ -192,7 +230,7 @@ export function EmployeesPage() {
           email: email.trim() || undefined,
           mobile: mobile || undefined,
           department: department || (roleSimple === 'staff' ? staffSubType : undefined),
-          branch_id: createBranch === '' ? undefined : Number(createBranch),
+          branch_id: Number(createBranch),
           dob: dob || undefined,
           joining_date: joiningDate || undefined,
           address: address || undefined,
@@ -201,6 +239,13 @@ export function EmployeesPage() {
           bank_name: bankName || undefined,
         }),
       })
+      const createdEmp = created.employee || created.user
+      if (createdEmp && createdEmp.id) {
+        setList((prev) => {
+          const without = prev.filter((x) => Number(x.id) !== Number(createdEmp.id))
+          return [createdEmp, ...without]
+        })
+      }
       setName('')
       setPassword('')
       setEmployeeId('')
@@ -275,6 +320,7 @@ export function EmployeesPage() {
     if (!edit) return
     setErr(null)
     try {
+      console.log('[employees.update] sending request', { id: edit.id })
       await api(`/users/${edit.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
@@ -308,8 +354,57 @@ export function EmployeesPage() {
   async function deleteEmp(id: number) {
     setErr(null)
     try {
+      console.log('[employees.delete] sending request', { id })
       await api(`/staff/${id}`, { method: 'DELETE' })
-      setList((prev) => prev.filter((x) => x.id !== id))
+      await refresh()
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+
+  async function resetPasswordByAdmin(id: number) {
+    setErr(null)
+    setSecurityMsg('')
+    try {
+      const r = await api<{ temporary_password?: string; message?: string }>(`/users/${id}/reset-password`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      setSecurityMsg(`Temporary password: ${r.temporary_password || '(hidden)'} ${r.message || ''}`.trim())
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+
+  async function revealTemporaryPassword(id: number) {
+    setErr(null)
+    setSecurityMsg('')
+    try {
+      const r = await api<{ temporary_password: string; note?: string }>(`/users/${id}/reveal-password`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      setSecurityMsg(`Secure reveal (temporary): ${r.temporary_password}${r.note ? ` — ${r.note}` : ''}`)
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+  async function lockUser(id: number) {
+    setErr(null)
+    try {
+      await api(`/users/${id}/lock`, { method: 'POST', body: JSON.stringify({}) })
+      setSecurityMsg('User locked.')
+      await refresh()
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+  async function unlockUser(id: number) {
+    setErr(null)
+    try {
+      await api(`/users/${id}/unlock`, { method: 'POST', body: JSON.stringify({}) })
+      setSecurityMsg('User unlocked.')
+      await refresh()
     } catch (e) {
       setErr((e as Error).message)
     }
@@ -378,6 +473,16 @@ export function EmployeesPage() {
         body: JSON.stringify({ name }),
       })
       setNewDepartment('')
+      await refresh()
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+
+  async function deleteDepartment(id: number) {
+    setErr(null)
+    try {
+      await api(`/departments/${id}`, { method: 'DELETE' })
       await refresh()
     } catch (e) {
       setErr((e as Error).message)
@@ -496,8 +601,9 @@ export function EmployeesPage() {
               />
             </label>
             <label className="text-sm">
-              <span className="mb-1 block font-medium">Mobile</span>
+              <span className="mb-1 block font-medium">Mobile *</span>
               <input
+                required
                 value={mobile}
                 onChange={(e) => setMobile(e.target.value)}
                 className="w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm"
@@ -526,9 +632,9 @@ export function EmployeesPage() {
             </label>
             {canBranches && branches.length > 0 && (
               <label className="text-sm">
-                <span className="mb-1 block font-medium">Branch</span>
+                <span className="mb-1 block font-medium">Branch *</span>
                 <select value={createBranch} onChange={(e) => setCreateBranch(e.target.value === '' ? '' : Number(e.target.value))} className="w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm">
-                  <option value="">Auto (my branch)</option>
+                  <option value="">Select branch</option>
                   {branches.map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.name}
@@ -577,10 +683,16 @@ export function EmployeesPage() {
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            {departmentNames.map((d) => (
-              <span key={d} className="rounded-full bg-[#e8f5e9] px-2.5 py-1 text-xs font-semibold text-[#1f5e3b]">
-                {d}
-              </span>
+            {departments.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                onClick={() => void deleteDepartment(d.id)}
+                className="rounded-full bg-[#e8f5e9] px-2.5 py-1 text-xs font-semibold text-[#1f5e3b]"
+                title="Delete department"
+              >
+                {d.name} ×
+              </button>
             ))}
           </div>
         </div>
@@ -662,7 +774,11 @@ export function EmployeesPage() {
               </thead>
               <tbody>
                 {filteredList.map((r) => (
-                  <tr key={r.id} id={`emp-row-${r.id}`} className="border-b border-[#1f5e3b]/5">
+                  <tr
+                    key={r.id}
+                    id={`emp-row-${r.id}`}
+                    className={`border-b border-[#1f5e3b]/5 ${highlightEmployeeId === r.id ? 'bg-[#e8f5e9]/60' : ''}`}
+                  >
                     <td className="py-2 pr-3">
                       {r.profile_photo ? (
                         <img src={r.profile_photo} alt={r.name} className="h-9 w-9 rounded-full object-cover" />
@@ -731,7 +847,9 @@ export function EmployeesPage() {
               <div
                 key={r.id}
                 id={`emp-card-${r.id}`}
-                className="flex flex-col rounded-2xl border border-[#1f5e3b]/10 bg-white/90 p-4 shadow-sm"
+                className={`flex flex-col rounded-2xl border p-4 shadow-sm ${
+                  highlightEmployeeId === r.id ? 'border-[#2e7d32] bg-[#e8f5e9]/60' : 'border-[#1f5e3b]/10 bg-white/90'
+                }`}
               >
                 <div className="flex items-start gap-3">
                   {r.profile_photo ? (
@@ -917,6 +1035,41 @@ export function EmployeesPage() {
             </label>
             <div className="mt-3 rounded-xl border border-[#1f5e3b]/10 bg-[#f7fbf8] p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-[#1f5e3b]/70">Attendance controls</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditAllowFace(true)
+                    setEditAllowFingerprint(true)
+                    setEditAllowManual(true)
+                  }}
+                  className="rounded-lg border border-[#1f5e3b]/20 px-2 py-1 text-xs font-semibold text-[#1f5e3b]"
+                >
+                  Biometric: Face + Thumb
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditAllowFace(true)
+                    setEditAllowFingerprint(false)
+                    setEditAllowManual(true)
+                  }}
+                  className="rounded-lg border border-[#1f5e3b]/20 px-2 py-1 text-xs font-semibold text-[#1f5e3b]"
+                >
+                  Biometric: Face only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditAllowFace(false)
+                    setEditAllowFingerprint(false)
+                    setEditAllowManual(false)
+                  }}
+                  className="rounded-lg border border-red-300 px-2 py-1 text-xs font-semibold text-red-700"
+                >
+                  Disable all attendance modes
+                </button>
+              </div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={editAllowGps} onChange={(e) => setEditAllowGps(e.target.checked)} />
@@ -937,10 +1090,27 @@ export function EmployeesPage() {
               </div>
             </div>
             {user?.role === 'SUPER_ADMIN' && (
-              <label className="mt-3 block text-sm">
-                <span className="mb-1 block font-medium">Reset password (optional)</span>
-                <input type="password" value={editPassword} onChange={(e) => setEditPassword(e.target.value)} placeholder="Leave blank to keep existing password" className="w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm" />
-              </label>
+              <>
+                <label className="mt-3 block text-sm">
+                  <span className="mb-1 block font-medium">Reset password (optional)</span>
+                  <input type="password" value={editPassword} onChange={(e) => setEditPassword(e.target.value)} placeholder="Leave blank to keep existing password" className="w-full rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm" />
+                </label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => void resetPasswordByAdmin(edit.id)} className="rounded-lg border border-[#1f5e3b]/20 px-3 py-1.5 text-xs font-semibold text-[#1f5e3b]">
+                    Reset password now
+                  </button>
+                  <button type="button" onClick={() => void revealTemporaryPassword(edit.id)} className="rounded-lg border border-[#1f5e3b]/20 px-3 py-1.5 text-xs font-semibold text-[#1f5e3b]">
+                    View password (secure reveal)
+                  </button>
+                  <button type="button" onClick={() => void lockUser(edit.id)} className="rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-semibold text-amber-800">
+                    Lock user
+                  </button>
+                  <button type="button" onClick={() => void unlockUser(edit.id)} className="rounded-lg border border-[#1f5e3b]/20 px-3 py-1.5 text-xs font-semibold text-[#1f5e3b]">
+                    Unlock user
+                  </button>
+                </div>
+                {securityMsg && <p className="mt-2 text-xs text-[#1f5e3b]">{securityMsg}</p>}
+              </>
             )}
             <div className="mt-6 flex gap-3">
               <button type="submit" className="rounded-xl bg-[#1f5e3b] px-4 py-2 text-sm font-semibold text-white">

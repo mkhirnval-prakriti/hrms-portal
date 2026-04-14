@@ -136,6 +136,27 @@ function registerEnterpriseRoutes(router, ctx) {
     });
   });
 
+  router.post("/users/:id/reveal-password", attachUser, (req, res) => {
+    if (!isSuper(req.currentUser, ROLES)) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const id = Number(req.params.id);
+    const target = db.prepare(`SELECT * FROM users WHERE id = ?`).get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    const temporaryPassword =
+      `Ph@${crypto.randomBytes(4).toString("hex")}${crypto.randomBytes(2).toString("hex")}`;
+    const hash = bcrypt.hashSync(temporaryPassword, 10);
+    db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(hash, id);
+    insertAudit(req.currentUser.id, "password_reveal_temp_issue", "user", id, {});
+    scheduleUserSync(db, id);
+    appsScriptScheduleUser(db, id);
+    res.json({
+      ok: true,
+      temporary_password: temporaryPassword,
+      note: "For security, stored passwords are hashed. A temporary password has been issued.",
+    });
+  });
+
   router.delete("/attendance/:id", attachUser, (req, res) => {
     if (!isSuper(req.currentUser, ROLES) && !can(req.currentUser, "attendance:edit_any")) {
       return res.status(403).json({ error: "Forbidden" });

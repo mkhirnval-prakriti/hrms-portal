@@ -14,6 +14,15 @@ type LeaveRow = {
   admin_review: string | null
   full_name?: string
 }
+type LeaveMessage = {
+  id: number
+  leave_id: number
+  author_id: number
+  author_name: string
+  author_role: string
+  body: string
+  created_at: string
+}
 
 export function LeavesPage() {
   const { user } = useAuth()
@@ -26,6 +35,9 @@ export function LeavesPage() {
   const [reason, setReason] = useState('')
   const [comment, setComment] = useState('')
   const [search, setSearch] = useState('')
+  const [openThreadId, setOpenThreadId] = useState<number | null>(null)
+  const [threads, setThreads] = useState<Record<number, LeaveMessage[]>>({})
+  const [threadDraft, setThreadDraft] = useState<Record<number, string>>({})
 
   const canApply = canPerm(user, 'leave:apply')
   const canMgr = canPerm(user, 'leave:approve_manager')
@@ -57,7 +69,30 @@ export function LeavesPage() {
         body: JSON.stringify({ start_date: start, end_date: end, reason }),
       })
       setReason('')
+      setStart('')
+      setEnd('')
       await load()
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+  }
+
+  async function loadThread(leaveId: number) {
+    const data = await api<{ messages: LeaveMessage[] }>(`/leave/${leaveId}/thread`)
+    setThreads((prev) => ({ ...prev, [leaveId]: data.messages || [] }))
+  }
+
+  async function sendThreadMessage(leaveId: number) {
+    const body = String(threadDraft[leaveId] || '').trim()
+    if (!body) return
+    setErr(null)
+    try {
+      await api(`/leave/${leaveId}/thread`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      })
+      setThreadDraft((prev) => ({ ...prev, [leaveId]: '' }))
+      await loadThread(leaveId)
     } catch (e) {
       setErr((e as Error).message)
     }
@@ -225,6 +260,20 @@ export function LeavesPage() {
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (openThreadId === L.id) {
+                          setOpenThreadId(null)
+                          return
+                        }
+                        setOpenThreadId(L.id)
+                        await loadThread(L.id)
+                      }}
+                      className="rounded-lg border border-[#1f5e3b]/20 px-3 py-1.5 text-xs font-semibold text-[#1f5e3b]"
+                    >
+                      {openThreadId === L.id ? 'Hide thread' : 'Open thread'}
+                    </button>
                     {canMgr && L.final_status === 'PENDING' && L.manager_review == null && (
                       <>
                         <button
@@ -266,6 +315,51 @@ export function LeavesPage() {
                       )}
                   </div>
                 </div>
+                {openThreadId === L.id && (
+                  <div className="mt-4 rounded-xl border border-[#1f5e3b]/10 bg-[#f7fbf8] p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[#1f5e3b]/80">Conversation</p>
+                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto pr-1">
+                      {(threads[L.id] || []).map((m) => (
+                        <div
+                          key={m.id}
+                          className={`max-w-[85%] rounded-lg px-3 py-2 text-xs ${
+                            Number(m.author_id) === Number(user?.id)
+                              ? 'ml-auto bg-[#1f5e3b] text-white'
+                              : 'bg-white text-[#14261a] ring-1 ring-[#1f5e3b]/10'
+                          }`}
+                        >
+                          <p className="font-semibold">
+                            {m.author_name} · {m.author_role}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap">{m.body}</p>
+                          <p className="mt-1 opacity-80">{new Date(m.created_at).toLocaleString()}</p>
+                        </div>
+                      ))}
+                      {(threads[L.id] || []).length === 0 && (
+                        <p className="text-xs text-[#1f5e3b]/65">No messages yet. Start the discussion here.</p>
+                      )}
+                    </div>
+                    {L.final_status === 'PENDING' ? (
+                      <div className="mt-3 flex gap-2">
+                        <input
+                          value={threadDraft[L.id] || ''}
+                          onChange={(e) => setThreadDraft((prev) => ({ ...prev, [L.id]: e.target.value }))}
+                          placeholder="Type a reply..."
+                          className="flex-1 rounded-lg border border-[#1f5e3b]/20 px-3 py-2 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => sendThreadMessage(L.id)}
+                          className="rounded-lg bg-[#1f5e3b] px-3 py-2 text-xs font-semibold text-white"
+                        >
+                          Send
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-xs text-[#1f5e3b]/65">Thread closed after final decision.</p>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
             {filteredLeaves.length === 0 && (

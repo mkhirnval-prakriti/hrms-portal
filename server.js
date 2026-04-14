@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
@@ -102,6 +103,15 @@ const db = openDb();
 hydrateRuntimeSecrets(db);
 const apiRouter = createApiRouter(db);
 
+if (!String(process.env.SESSION_SECRET || "").trim()) {
+  process.env.SESSION_SECRET = crypto.randomBytes(32).toString("hex");
+  console.warn("[hrms] SESSION_SECRET missing; generated runtime fallback secret.");
+}
+if (!String(process.env.JWT_SECRET || "").trim()) {
+  process.env.JWT_SECRET = crypto.randomBytes(48).toString("hex");
+  console.warn("[hrms] JWT_SECRET missing; generated runtime fallback secret.");
+}
+
 function purgeDeletedUsers() {
   const mode = String(process.env.TRASH_RETENTION_MODE || "days").toLowerCase();
   const days = Number(process.env.TRASH_RETENTION_DAYS || 30);
@@ -144,32 +154,20 @@ app.use(
   express.static(path.join(__dirname, "legacy"), { index: "index.html" })
 );
 
-app.use("/portal", express.static(path.join(__dirname, "public", "portal")));
-
-app.get(/^\/portal(\/.*)?$/, (req, res, next) => {
-  if (req.method !== "GET" && req.method !== "HEAD") return next();
-  if (path.extname(req.path)) return next();
-  res.sendFile(path.join(__dirname, "public", "portal", "index.html"));
-});
-
 /** React (Vite) build — served before root `public/` so `/` is the HRMS SPA. */
-const staticAppDir = process.env.STATIC_APP_DIR
-  ? path.resolve(process.env.STATIC_APP_DIR)
-  : path.join(__dirname, "dist");
+const staticAppDir = path.join(__dirname, "dist");
 const appIndex = path.join(staticAppDir, "index.html");
 if (!fs.existsSync(appIndex)) {
   console.warn(`[hrms] SPA bundle not found at ${appIndex}. Run: npm run build`);
 }
-app.use(express.static(staticAppDir));
-app.use(express.static("public"));
-/** Optional History-style paths: skip APIs, uploads, legacy, portal, and real files. */
-app.get(/^\/.+/, (req, res, next) => {
+app.use(express.static("dist"));
+/** Optional History-style paths: skip APIs, uploads, legacy, and real files. */
+app.get("*", (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
   if (path.extname(req.path)) return next();
   if (req.path.startsWith("/api")) return next();
   if (req.path.startsWith("/uploads")) return next();
   if (req.path.startsWith("/legacy")) return next();
-  if (req.path.startsWith("/portal")) return next();
   res.sendFile(appIndex);
 });
 

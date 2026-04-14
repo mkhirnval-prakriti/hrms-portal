@@ -63,11 +63,7 @@ export function TopBar({ onMenu }: TopBarProps) {
     (id: number) => {
       setSearchOpen(false)
       setQ('')
-      nav('/employees')
-      window.setTimeout(() => {
-        const el = document.getElementById(`emp-row-${id}`)
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }, 300)
+      nav(`/employees/${id}`)
     },
     [nav]
   )
@@ -120,6 +116,7 @@ export function TopBar({ onMenu }: TopBarProps) {
                   type="button"
                   className="flex w-full flex-col items-start px-3 py-2 text-left text-sm hover:bg-[#1f5e3b]/5"
                   onMouseDown={() => goEmployee(e.id)}
+                  onClick={() => goEmployee(e.id)}
                 >
                   <span className="font-medium text-[#14261a]">{e.full_name}</span>
                   <span className="text-xs text-[#1f5e3b]/65">

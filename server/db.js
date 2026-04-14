@@ -225,6 +225,11 @@ function migrate(db) {
   tryAddColumn(db, "users", "deleted_at TEXT");
 
   tryAddColumn(db, "branches", "address TEXT");
+  tryAddColumn(db, "branches", "city TEXT");
+  tryAddColumn(db, "branches", "state TEXT");
+  tryAddColumn(db, "branches", "wifi_enabled INTEGER NOT NULL DEFAULT 0");
+  tryAddColumn(db, "branches", "wifi_ssids TEXT");
+  tryAddColumn(db, "users", "kiosk_pin_hash TEXT");
 
   const attCols = [
     ["punch_in_address", "TEXT"],
@@ -262,6 +267,16 @@ function migrate(db) {
   tryAddColumn(db, "employee_documents", "account_number TEXT");
   tryAddColumn(db, "employee_documents", "ifsc TEXT");
   tryAddColumn(db, "employee_documents", "bank_name TEXT");
+  tryAddColumn(db, "employee_documents", "doc_status TEXT NOT NULL DEFAULT 'pending'");
+  db.exec(`
+    UPDATE employee_documents
+    SET doc_status = CASE
+      WHEN verified = 1 THEN 'approved'
+      WHEN verified = 0 THEN COALESCE(doc_status, 'pending')
+      ELSE 'pending'
+    END
+    WHERE doc_status IS NULL OR doc_status = '';
+  `);
   tryAddColumn(db, "user_face_profiles", "embedding_json TEXT");
 
   db.exec(`
@@ -295,6 +310,17 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_leave_user ON leave_requests(user_id);
     CREATE INDEX IF NOT EXISTS idx_leave_status ON leave_requests(final_status);
+
+    CREATE TABLE IF NOT EXISTS leave_threads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      leave_id INTEGER NOT NULL,
+      author_id INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (leave_id) REFERENCES leave_requests(id),
+      FOREIGN KEY (author_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_leave_threads_leave ON leave_threads(leave_id, id);
   `);
 
   db.exec(`
@@ -305,6 +331,7 @@ function migrate(db) {
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
       verified INTEGER NOT NULL DEFAULT 0,
+      doc_status TEXT NOT NULL DEFAULT 'pending',
       verified_by INTEGER,
       verified_at TEXT,
       verifier_notes TEXT,
@@ -424,6 +451,11 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_pwreset_otp_user ON password_reset_otps(user_id);
   `);
+  db.exec(`
+    DELETE FROM branches
+    WHERE lower(name) IN ('head office', 'dera bassi')
+      AND id NOT IN (SELECT DISTINCT COALESCE(branch_id, -1) FROM users WHERE deleted_at IS NULL);
+  `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS integration_kv (
@@ -442,6 +474,26 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+
+    CREATE TABLE IF NOT EXISTS custom_roles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      permissions_json TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS user_role_assignments (
+      user_id INTEGER PRIMARY KEY,
+      custom_role_id INTEGER NOT NULL,
+      assigned_by INTEGER,
+      assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (custom_role_id) REFERENCES custom_roles(id),
+      FOREIGN KEY (assigned_by) REFERENCES users(id)
+    );
   `);
 
   db.exec(`
@@ -791,6 +843,7 @@ function ensureBootstrapData(db) {
       companyKey,
       JSON.stringify({
         company_name: "Prakriti Herbs Private Limited",
+        legal_name: "PRAKRITI HERBS PRIVATE LIMITED",
         address: "Amer, Jaipur, Rajasthan - 302012",
         city: "Jaipur",
         state: "Rajasthan",
@@ -798,6 +851,10 @@ function ensureBootstrapData(db) {
         gstin: "08AAQCP4095D1Z2",
         cin: "U46497RJ2025PTC109202",
         director: "Mandeep Kumar",
+        authorized_signatory: "Mandeep Kumar",
+        email: "contact@prakritiherbs.in",
+        legal_address:
+          "Building No. 30 & 31, South Part, Bilochi Nagar A, Amer, Jaipur, Rajasthan - 302012",
       })
     );
   }

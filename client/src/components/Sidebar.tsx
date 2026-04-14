@@ -5,11 +5,9 @@ import { canPerm } from '../lib/permissions'
 
 const items: { to: string; label: string; Icon: FC<{ className?: string }> }[] = [
   { to: '/', label: 'Dashboard', Icon: IconHome },
-  { to: '/reports', label: 'Reports', Icon: IconChart },
-  { to: '/attendance', label: 'Attendance', Icon: IconClock },
+  { to: '/attendance', label: 'Attendance Dashboard', Icon: IconClock },
   { to: '/identity', label: 'Identity', Icon: IconId },
   { to: '/biometric-requests', label: 'Biometrics', Icon: IconIdAdmin },
-  { to: '/crm', label: 'CRM Leads', Icon: IconBriefcase },
   { to: '/employees', label: 'Employees', Icon: IconUsers },
   { to: '/documents', label: 'Doc Verification', Icon: IconDoc },
   { to: '/leaves', label: 'Leaves', Icon: IconCalendar },
@@ -49,8 +47,6 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     if (it.to === '/leaves') return canPerm(user, 'leave:read_all') || canPerm(user, 'leave:read_self')
     if (it.to === '/payroll') return canPerm(user, 'payroll:read') || canPerm(user, 'payroll:read_self')
     if (it.to === '/office') return canPerm(user, 'branches:read')
-    if (it.to === '/reports') return canPerm(user, 'export:read') || canPerm(user, 'dashboard:read')
-    if (it.to === '/crm') return canPerm(user, 'crm:read')
     if (it.to === '/company' || it.to === '/guide' || it.to === '/notices') return true
     if (it.to === '/trash') return user.role === 'SUPER_ADMIN'
     return true
@@ -112,13 +108,6 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   )
 }
 
-function IconChart({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-    </svg>
-  )
-}
 
 function IconHome({ className }: { className?: string }) {
   return (
@@ -145,17 +134,6 @@ function IconIdAdmin({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-    </svg>
-  )
-}
-function IconBriefcase({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-      />
     </svg>
   )
 }

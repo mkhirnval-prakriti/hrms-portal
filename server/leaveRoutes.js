@@ -2,6 +2,49 @@ const { ROLES } = require("./rbac");
 const { notifyLeaveWhatsApp } = require("./whatsapp");
 
 function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, auditLeave }) {
+  function todayYmd() {
+    return new Date().toISOString().slice(0, 10);
+  }
+  function toYmd(d) {
+    return new Date(d).toISOString().slice(0, 10);
+  }
+  function dateRange(start, end) {
+    const out = [];
+    const s = new Date(`${start}T00:00:00Z`);
+    const e = new Date(`${end}T00:00:00Z`);
+    for (let d = new Date(s); d <= e; d.setUTCDate(d.getUTCDate() + 1)) {
+      out.push(toYmd(d));
+    }
+    return out;
+  }
+  function applyApprovedLeaveToAttendance(leaveRow, editorId) {
+    const days = dateRange(String(leaveRow.start_date), String(leaveRow.end_date));
+    for (const day of days) {
+      const existing = db
+        .prepare("SELECT id, punch_in_at, punch_out_at FROM attendance_records WHERE user_id = ? AND work_date = ?")
+        .get(leaveRow.user_id, day);
+      if (!existing) {
+        db.prepare(
+          `INSERT INTO attendance_records
+           (user_id, work_date, status, source, notes, last_edited_by)
+           VALUES (?, ?, 'leave', 'manual', ?, ?)`
+        ).run(leaveRow.user_id, day, `Leave approved (#${leaveRow.id})`, editorId);
+        continue;
+      }
+      if (!existing.punch_in_at && !existing.punch_out_at) {
+        db.prepare(
+          `UPDATE attendance_records
+           SET status = 'leave', source = 'manual', notes = ?, last_edited_by = ?
+           WHERE id = ?`
+        ).run(`Leave approved (#${leaveRow.id})`, editorId, existing.id);
+      }
+    }
+  }
+  function canAccessLeaveThread(currentUser, leaveRow) {
+    if (!leaveRow) return false;
+    if (Number(currentUser.id) === Number(leaveRow.user_id)) return true;
+    return can(currentUser, "leave:read_all");
+  }
   function afterLeaveChange(leaveId) {
     if (typeof onLeaveChange === "function") onLeaveChange(leaveId);
   }
@@ -14,12 +57,20 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
     if (!start_date || !end_date || !reason) {
       return res.status(400).json({ error: "start_date, end_date, reason required" });
     }
+    const s = String(start_date);
+    const e = String(end_date);
+    if (s < todayYmd() || e < todayYmd()) {
+      return res.status(400).json({ error: "Backdated leave is not allowed" });
+    }
+    if (e < s) {
+      return res.status(400).json({ error: "end_date must be on/after start_date" });
+    }
     const info = db
       .prepare(
         `INSERT INTO leave_requests (user_id, start_date, end_date, reason, final_status, updated_at)
          VALUES (?,?,?,?, 'PENDING', datetime('now'))`
       )
-      .run(req.currentUser.id, String(start_date), String(end_date), String(reason));
+      .run(req.currentUser.id, s, e, String(reason).trim());
     const row = db.prepare("SELECT * FROM leave_requests WHERE id = ?").get(info.lastInsertRowid);
     if (typeof auditLeave === "function") {
       auditLeave(req.currentUser.id, "leave_apply", row.id, { start_date, end_date });
@@ -95,6 +146,7 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
        WHERE id = ?`
     ).run((req.body && req.body.comment) || null, req.currentUser.id, row.id);
     const updated = db.prepare("SELECT * FROM leave_requests WHERE id = ?").get(row.id);
+    applyApprovedLeaveToAttendance(updated, req.currentUser.id);
     if (typeof auditLeave === "function") {
       auditLeave(req.currentUser.id, "leave_manager_approve", row.id, {});
     }
@@ -131,8 +183,8 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
   });
 
   router.post("/leave/:id/admin-approve", attachUser, (req, res) => {
-    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
-      return res.status(403).json({ error: "Only Super Admin can final-approve" });
+    if (!can(req.currentUser, "leave:approve_manager")) {
+      return res.status(403).json({ error: "Forbidden" });
     }
     const row = getLeave(req.params.id);
     if (!row) return res.status(404).json({ error: "Not found" });
@@ -153,6 +205,7 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
        WHERE id = ?`
     ).run((req.body && req.body.comment) || null, req.currentUser.id, row.id);
     const updated = db.prepare("SELECT * FROM leave_requests WHERE id = ?").get(row.id);
+    applyApprovedLeaveToAttendance(updated, req.currentUser.id);
     if (typeof auditLeave === "function") {
       auditLeave(req.currentUser.id, "leave_admin_approve", row.id, {});
     }
@@ -162,8 +215,8 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
   });
 
   router.post("/leave/:id/admin-reject", attachUser, (req, res) => {
-    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
-      return res.status(403).json({ error: "Only Super Admin" });
+    if (!can(req.currentUser, "leave:approve_manager")) {
+      return res.status(403).json({ error: "Forbidden" });
     }
     const row = getLeave(req.params.id);
     if (!row) return res.status(404).json({ error: "Not found" });
@@ -228,6 +281,51 @@ function registerLeaveRoutes(router, db, { attachUser, can, onLeaveChange, audit
     }
     afterLeaveChange(id);
     res.json({ ok: true, id });
+  });
+
+  router.get("/leave/:id/thread", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const leaveRow = getLeave(id);
+    if (!leaveRow) return res.status(404).json({ error: "Not found" });
+    if (!canAccessLeaveThread(req.currentUser, leaveRow)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const messages = db
+      .prepare(
+        `SELECT t.id, t.leave_id, t.author_id, u.full_name AS author_name, u.role AS author_role, t.body, t.created_at
+         FROM leave_threads t
+         JOIN users u ON u.id = t.author_id
+         WHERE t.leave_id = ?
+         ORDER BY t.id ASC`
+      )
+      .all(id);
+    res.json({ leave: leaveRow, messages });
+  });
+
+  router.post("/leave/:id/thread", attachUser, (req, res) => {
+    const id = Number(req.params.id);
+    const leaveRow = getLeave(id);
+    if (!leaveRow) return res.status(404).json({ error: "Not found" });
+    if (!canAccessLeaveThread(req.currentUser, leaveRow)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (String(leaveRow.final_status || "").toUpperCase() !== "PENDING") {
+      return res.status(400).json({ error: "Thread closed after final decision" });
+    }
+    const body = String(req.body?.body || "").trim();
+    if (!body) return res.status(400).json({ error: "body required" });
+    const info = db
+      .prepare("INSERT INTO leave_threads (leave_id, author_id, body) VALUES (?,?,?)")
+      .run(id, req.currentUser.id, body);
+    const message = db
+      .prepare(
+        `SELECT t.id, t.leave_id, t.author_id, u.full_name AS author_name, u.role AS author_role, t.body, t.created_at
+         FROM leave_threads t
+         JOIN users u ON u.id = t.author_id
+         WHERE t.id = ?`
+      )
+      .get(info.lastInsertRowid);
+    res.json({ message });
   });
 }
 

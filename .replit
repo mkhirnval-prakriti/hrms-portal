@@ -8,5 +8,6 @@ entrypoint = "server.js"
 channel = "stable-24_05"
 
 [deployment]
+deploymentTarget = "vm"
 run = ["sh", "-c", "npm install && npm run build && npm start"]
 build = ["sh", "-c", "npm install && npm run build"]

@@ -144,6 +144,31 @@ function createApiRouter(db) {
     return `PH-${code}-${String(nextNum).padStart(3, "0")}`;
   }
 
+  function isLoginIdTaken(loginId) {
+    if (!loginId || !String(loginId).trim()) return false;
+    const row = db.prepare("SELECT id FROM users WHERE login_id = ? LIMIT 1").get(String(loginId).trim());
+    return !!row;
+  }
+
+  function generateUniqueBranchEmployeeId(branchId) {
+    let candidate = generateBranchEmployeeId(branchId);
+    let safety = 0;
+    while (isLoginIdTaken(candidate) && safety < 1000) {
+      const m = String(candidate).match(/^(.*-)(\d+)$/);
+      if (!m) {
+        candidate = generateEmployeeLoginId();
+      } else {
+        const next = Number(m[2]) + 1;
+        candidate = `${m[1]}${String(next).padStart(Math.max(3, String(m[2]).length), "0")}`;
+      }
+      safety += 1;
+    }
+    if (isLoginIdTaken(candidate)) {
+      throw new Error("Unable to generate unique employee login id");
+    }
+    return candidate;
+  }
+
   function normalizeRoleInput(input) {
     const raw = String(input || "").trim().toLowerCase();
     if (raw === "super_admin" || raw === "super admin") return ROLES.SUPER_ADMIN;
@@ -199,6 +224,27 @@ function createApiRouter(db) {
   });
 
   function attachUser(req, res, next) {
+    function decorateUser(u) {
+      const ext = db
+        .prepare(
+          `SELECT cr.id AS custom_role_id, cr.name AS custom_role_name, cr.permissions_json
+           FROM user_role_assignments ura
+           JOIN custom_roles cr ON cr.id = ura.custom_role_id
+           WHERE ura.user_id = ? AND cr.active = 1`
+        )
+        .get(u.id);
+      if (!ext?.permissions_json) return u;
+      try {
+        return {
+          ...u,
+          custom_role_id: ext.custom_role_id,
+          custom_role_name: ext.custom_role_name,
+          custom_permissions: JSON.parse(ext.permissions_json),
+        };
+      } catch {
+        return u;
+      }
+    }
     const auth = req.headers.authorization;
     if (auth && typeof auth === "string" && auth.startsWith("Bearer ")) {
       try {
@@ -214,7 +260,7 @@ function createApiRouter(db) {
           )
           .get(uid);
         if (!user || !user.active) return res.status(401).json({ error: "Unauthorized" });
-        req.currentUser = user;
+        req.currentUser = decorateUser(user);
         return next();
       } catch {
         return res.status(401).json({ error: "Unauthorized" });
@@ -235,7 +281,7 @@ function createApiRouter(db) {
       req.session.destroy();
       return res.status(401).json({ error: "Unauthorized" });
     }
-    req.currentUser = user;
+    req.currentUser = decorateUser(user);
     next();
   }
 
@@ -274,18 +320,25 @@ function createApiRouter(db) {
   function readCompanyProfile() {
     const r = db.prepare("SELECT v FROM integration_kv WHERE k = ?").get(COMPANY_PROFILE_KEY);
     const base = {
-      company_name: "Prakriti Herbs Private Limited",
-      address: "Amer, Jaipur, Rajasthan - 302012",
+      company_name: "PRAKRITI HERBS PRIVATE LIMITED",
+      legal_name: "PRAKRITI HERBS PRIVATE LIMITED",
+      address: "Building No. 30 & 31, South Part, Bilochi Nagar A, Amer, Jaipur, Rajasthan - 302012",
+      legal_address:
+        "Building No. 30 & 31, South Part, Bilochi Nagar A, Amer, Jaipur, Rajasthan - 302012",
       city: "Jaipur",
       state: "Rajasthan",
       pincode: "302012",
       gstin: "08AAQCP4095D1Z2",
       cin: "U46497RJ2025PTC109202",
       director: "Mandeep Kumar",
+      authorized_signatory: "Mandeep Kumar",
       phone: "",
-      email: "",
+      email: "contact@prakritiherbs.in",
     };
-    if (!r || !r.v) return base;
+    if (!r || !r.v) {
+      writeCompanyProfile(base);
+      return base;
+    }
     try {
       return { ...base, ...JSON.parse(r.v) };
     } catch {
@@ -311,6 +364,7 @@ function createApiRouter(db) {
       },
       attendance_wifi: {
         enabled: false,
+        networks: [],
         allowed_ssids: [],
       },
       daily_report: {
@@ -846,11 +900,19 @@ function createApiRouter(db) {
       const wifiCfg = readAppSettings().attendance_wifi || { enabled: false, allowed_ssids: [] };
       if (wifiCfg.enabled) {
         const ssid = String(req.body?.wifi_ssid || req.body?.ssid || "").trim().toLowerCase();
-        const allowed = Array.isArray(wifiCfg.allowed_ssids)
-          ? wifiCfg.allowed_ssids.map((x) => String(x).trim().toLowerCase()).filter(Boolean)
-          : [];
+        const wifiPass = String(req.body?.wifi_password || "").trim();
+        const networks = Array.isArray(wifiCfg.networks) ? wifiCfg.networks : [];
+        const allowed = networks.map((x) => String(x?.ssid || "").trim().toLowerCase()).filter(Boolean);
+        const matchNetwork = networks.find(
+          (x) => String(x?.ssid || "").trim().toLowerCase() === ssid
+        );
         if (!ssid || (allowed.length > 0 && !allowed.includes(ssid))) {
           return res.status(403).json({ error: "Attendance allowed only on configured office WiFi SSID." });
+        }
+        if (matchNetwork && String(matchNetwork.password || "").trim()) {
+          if (String(matchNetwork.password).trim() !== wifiPass) {
+            return res.status(403).json({ error: "Invalid office WiFi password." });
+          }
         }
       }
 
@@ -1106,6 +1168,156 @@ function createApiRouter(db) {
     runPunch(req, res, next);
   });
 
+  function kioskFaceCandidates(actor) {
+    const sc = branchScopeSql(actor, "u");
+    return db
+      .prepare(
+        `SELECT u.id, u.login_id, u.full_name, u.active, p.embedding_json, p.phash
+         FROM users u
+         JOIN user_face_profiles p ON p.user_id = u.id
+         WHERE u.deleted_at IS NULL AND u.active = 1${sc.sql}
+         ORDER BY u.id DESC
+         LIMIT 500`
+      )
+      .all(...sc.params);
+  }
+
+  router.post("/kiosk/face/register", attachUser, upload.single("photo"), (req, res) => {
+    if (!can(req.currentUser, "attendance:kiosk")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (!req.file || req.file.size < 8192) {
+      return res.status(400).json({ error: "Live photo file required" });
+    }
+    const loginId = String(req.body?.login_id || "").trim();
+    if (!loginId) return res.status(400).json({ error: "login_id required" });
+    let faceDesc = req.body?.faceDescriptor;
+    if (typeof faceDesc === "string" && faceDesc.trim()) {
+      try {
+        faceDesc = JSON.parse(faceDesc);
+      } catch {
+        return res.status(400).json({ error: "Invalid faceDescriptor payload" });
+      }
+    }
+    const descriptor = parseEmbeddingPayload(faceDesc);
+    if (!descriptor) {
+      return res.status(400).json({ error: "faceDescriptor required (128-D array)" });
+    }
+    const userRow = db
+      .prepare(
+        `SELECT id, login_id, full_name, active FROM users
+         WHERE lower(ifnull(login_id,'')) = lower(?) AND deleted_at IS NULL`
+      )
+      .get(loginId);
+    if (!userRow || !userRow.active) return res.status(404).json({ error: "User not found" });
+    const scope = assertUserAccess(req.currentUser, userRow);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    let phash;
+    try {
+      phash = phashFromBuffer(fs.readFileSync(req.file.path));
+    } catch (e) {
+      return res.status(400).json({ error: "Could not process face image: " + (e.message || String(e)) });
+    }
+    const rel = `/uploads/attendance/${req.file.filename}`;
+    db.prepare(
+      `INSERT OR REPLACE INTO user_face_profiles (user_id, phash, reference_path, embedding_json, updated_at)
+       VALUES (?,?,?,?,datetime('now'))`
+    ).run(userRow.id, phash, rel, JSON.stringify(descriptor));
+    insertAudit(req.currentUser.id, "kiosk_face_register", "user_face_profiles", String(userRow.id), {});
+    return res.json({
+      ok: true,
+      user_id: userRow.id,
+      login_id: userRow.login_id,
+      full_name: userRow.full_name,
+      reference_path: rel,
+    });
+  });
+
+  router.post("/kiosk/face/match", attachUser, upload.single("photo"), (req, res) => {
+    if (!can(req.currentUser, "attendance:kiosk")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (!req.file || req.file.size < 8192) {
+      return res.status(400).json({ error: "Live photo file required" });
+    }
+    let faceDesc = req.body?.faceDescriptor;
+    if (typeof faceDesc === "string" && faceDesc.trim()) {
+      try {
+        faceDesc = JSON.parse(faceDesc);
+      } catch {
+        return res.status(400).json({ error: "Invalid faceDescriptor payload" });
+      }
+    }
+    const descriptor = parseEmbeddingPayload(faceDesc);
+    if (!descriptor) {
+      return res.status(400).json({ error: "faceDescriptor required (128-D array)" });
+    }
+    const candidates = kioskFaceCandidates(req.currentUser);
+    if (!candidates.length) {
+      return res.status(404).json({ error: "User not registered", code: "FACE_NOT_REGISTERED" });
+    }
+    let best = null;
+    for (const c of candidates) {
+      const m = matchEmbedding(c.embedding_json, descriptor);
+      if (!m.ok) continue;
+      if (!best || Number(m.distance) < Number(best.distance)) {
+        best = { ...c, distance: m.distance, threshold: m.threshold };
+      }
+    }
+    if (!best) {
+      return res.status(404).json({ error: "User not registered", code: "FACE_NOT_REGISTERED" });
+    }
+    return res.json({
+      ok: true,
+      matched_user_id: best.id,
+      login_id: best.login_id,
+      full_name: best.full_name,
+      distance: best.distance,
+      threshold: best.threshold,
+    });
+  });
+
+  router.post("/attendance/face-punch", attachUser, upload.single("photo"), (req, res, next) => {
+    if (!can(req.currentUser, "attendance:kiosk")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const targetUserId = Number(req.body?.matched_user_id || 0);
+    if (!targetUserId) {
+      return res.status(400).json({ error: "matched_user_id required" });
+    }
+    const target = db
+      .prepare(
+        `SELECT id, login_id, full_name, active FROM users WHERE id = ? AND deleted_at IS NULL`
+      )
+      .get(targetUserId);
+    if (!target || !target.active) return res.status(404).json({ error: "User not found" });
+    const day = todayLocalDate();
+    const rec = db.prepare("SELECT punch_in_at, punch_out_at FROM attendance_records WHERE user_id = ? AND work_date = ?").get(target.id, day);
+    let type = "in";
+    if (rec && rec.punch_in_at && !rec.punch_out_at) type = "out";
+    else if (rec && rec.punch_in_at && rec.punch_out_at) {
+      return res.status(400).json({ error: "Already punched out", code: "ALREADY_COMPLETED" });
+    }
+    let faceDesc = req.body?.faceDescriptor;
+    if (typeof faceDesc === "string" && faceDesc.trim()) {
+      try {
+        faceDesc = JSON.parse(faceDesc);
+      } catch {
+        return res.status(400).json({ error: "Invalid faceDescriptor payload" });
+      }
+    }
+    req.body = {
+      ...(req.body || {}),
+      type,
+      source: "kiosk",
+      targetUserId: target.id,
+      useBranchCenter: true,
+      attendanceMethod: "face",
+      faceDescriptor: faceDesc,
+    };
+    return runPunch(req, res, next);
+  });
+
   router.post("/attendance/checkout", attachUser, (req, res, next) => {
     const ct = req.headers["content-type"] || "";
     if (ct.includes("multipart/form-data")) {
@@ -1119,6 +1331,86 @@ function createApiRouter(db) {
     }
     req.body = { ...(req.body || {}), type: "out", source: (req.body && req.body.source) || "device" };
     runPunch(req, res, next);
+  });
+
+  router.post("/kiosk/pin/register", attachUser, (req, res) => {
+    if (!can(req.currentUser, "users:update")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const userId = Number(req.body?.userId || 0);
+    const pin = String(req.body?.pin || "").trim();
+    if (!userId || pin.length < 4 || pin.length > 8) {
+      return res.status(400).json({ error: "userId and 4-8 digit pin required" });
+    }
+    const userRow = db.prepare("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL").get(userId);
+    if (!userRow) return res.status(404).json({ error: "User not found" });
+    const hash = bcrypt.hashSync(pin, 10);
+    db.prepare("UPDATE users SET kiosk_pin_hash = ? WHERE id = ?").run(hash, userId);
+    insertAudit(req.currentUser.id, "kiosk_pin_register", "user", userId, {});
+    res.json({ ok: true });
+  });
+
+  router.post("/kiosk/pin/punch", attachUser, (req, res) => {
+    if (!can(req.currentUser, "attendance:kiosk")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const loginId = String(req.body?.login_id || "").trim();
+    const pin = String(req.body?.pin || "").trim();
+    const type = String(req.body?.type || "").toLowerCase() === "out" ? "out" : "in";
+    if (!loginId || !pin) return res.status(400).json({ error: "login_id and pin required" });
+    const target = db
+      .prepare(
+        `SELECT id, login_id, full_name, active, deleted_at, kiosk_pin_hash, allow_manual
+         FROM users WHERE lower(ifnull(login_id,'')) = lower(?)`
+      )
+      .get(loginId);
+    if (!target || target.deleted_at || !target.active) return res.status(404).json({ error: "User not found" });
+    if (!target.kiosk_pin_hash || !bcrypt.compareSync(pin, target.kiosk_pin_hash)) {
+      return res.status(401).json({ error: "Invalid PIN" });
+    }
+    if (Number(target.allow_manual ?? 1) === 0 && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Attendance disabled for this employee" });
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date().toISOString();
+    const rec = db.prepare("SELECT * FROM attendance_records WHERE user_id = ? AND work_date = ?").get(target.id, today);
+    if (!rec) {
+      const punchIn = type === "in" ? now : null;
+      const punchOut = type === "out" ? now : null;
+      const info = db
+        .prepare(
+          `INSERT INTO attendance_records
+           (user_id, work_date, punch_in_at, punch_out_at, status, source, notes, last_edited_by, punch_method_in, punch_method_out)
+           VALUES (?,?,?,?,?,'kiosk',?,?,?,?)`
+        )
+        .run(
+          target.id,
+          today,
+          punchIn,
+          punchOut,
+          punchIn ? "present" : "absent",
+          "Kiosk PIN punch",
+          req.currentUser.id,
+          type === "in" ? "pin" : null,
+          type === "out" ? "pin" : null
+        );
+      return res.json({ ok: true, record: db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(info.lastInsertRowid) });
+    }
+    if (type === "in") {
+      if (rec.punch_in_at) return res.status(400).json({ error: "Already punched in" });
+      db.prepare(
+        `UPDATE attendance_records SET punch_in_at = ?, status = 'present', source = 'kiosk',
+         punch_method_in = 'pin', last_edited_by = ?, notes = COALESCE(notes, 'Kiosk PIN punch') WHERE id = ?`
+      ).run(now, req.currentUser.id, rec.id);
+    } else {
+      if (!rec.punch_in_at) return res.status(400).json({ error: "Punch in first" });
+      if (rec.punch_out_at) return res.status(400).json({ error: "Already punched out" });
+      db.prepare(
+        `UPDATE attendance_records SET punch_out_at = ?, source = 'kiosk',
+         punch_method_out = 'pin', last_edited_by = ?, notes = COALESCE(notes, 'Kiosk PIN punch') WHERE id = ?`
+      ).run(now, req.currentUser.id, rec.id);
+    }
+    res.json({ ok: true, record: db.prepare("SELECT * FROM attendance_records WHERE id = ?").get(rec.id) });
   });
 
   router.post(
@@ -1242,7 +1534,7 @@ function createApiRouter(db) {
     res.json({ record: rec });
   });
 
-  router.patch("/attendance/:id", attachUser, (req, res) => {
+  router.patch("/attendance/:id([0-9]+)", attachUser, (req, res) => {
     const actor = req.currentUser;
     if (!can(actor, "attendance:edit_any") && !can(actor, "history:edit")) {
       return res.status(403).json({ error: "Forbidden" });
@@ -1339,15 +1631,27 @@ function createApiRouter(db) {
     }
 
     if (can(actor, "history:read_self")) {
-      const sql = `
+      let sql = `
         SELECT ar.*, u.full_name, u.email, u.branch_id
         FROM attendance_records ar
         JOIN users u ON u.id = ar.user_id
         WHERE ar.user_id = ?
-        ORDER BY ar.work_date DESC, ar.id DESC
-        LIMIT 200
       `;
-      const rows = db.prepare(sql).all(actor.id);
+      const params = [actor.id];
+      if (from) {
+        sql += " AND ar.work_date >= ?";
+        params.push(String(from));
+      }
+      if (to) {
+        sql += " AND ar.work_date <= ?";
+        params.push(String(to));
+      }
+      if (status) {
+        sql += " AND ar.status = ?";
+        params.push(String(status));
+      }
+      sql += " ORDER BY ar.work_date DESC, ar.id DESC LIMIT 200";
+      const rows = db.prepare(sql).all(...params);
       return res.json({ records: rows });
     }
 
@@ -2376,7 +2680,11 @@ function createApiRouter(db) {
     if (!can(req.currentUser, "branches:read")) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    res.json({ branches: db.prepare("SELECT * FROM branches ORDER BY name").all() });
+    res.json({
+      branches: db
+        .prepare("SELECT * FROM branches WHERE lower(name) NOT IN ('head office', 'derabassi', 'dera bassi') ORDER BY name")
+        .all(),
+    });
   });
   router.get("/departments", attachUser, (req, res) => {
     if (!can(req.currentUser, "departments:read") && !can(req.currentUser, "users:read")) {
@@ -2452,13 +2760,23 @@ function createApiRouter(db) {
     if (!isOrgWide(req.currentUser)) {
       return res.status(403).json({ error: "Only Super Admin / Admin can create branches" });
     }
-    const { name, lat, lng, radius_meters } = req.body || {};
+    const { name, lat, lng, radius_meters, address, city, state, wifi_enabled, wifi_ssids } = req.body || {};
     if (!name) return res.status(400).json({ error: "name required" });
     const info = db
       .prepare(
-        "INSERT INTO branches (name, lat, lng, radius_meters) VALUES (?,?,?,?)"
+        "INSERT INTO branches (name, lat, lng, radius_meters, address, city, state, wifi_enabled, wifi_ssids) VALUES (?,?,?,?,?,?,?,?,?)"
       )
-      .run(name, lat ?? null, lng ?? null, Number(radius_meters) || 300);
+      .run(
+        name,
+        lat ?? null,
+        lng ?? null,
+        Number(radius_meters) || 300,
+        address != null ? String(address) : null,
+        city != null ? String(city) : null,
+        state != null ? String(state) : null,
+        wifi_enabled ? 1 : 0,
+        Array.isArray(wifi_ssids) ? JSON.stringify(wifi_ssids.map((x) => String(x).trim()).filter(Boolean)) : null
+      );
     const b = db.prepare("SELECT * FROM branches WHERE id = ?").get(info.lastInsertRowid);
     insertAudit(req.currentUser.id, "branch_create", "branch", b.id, { name: b.name });
     scheduleBranchSync(db, b.id);
@@ -2471,21 +2789,58 @@ function createApiRouter(db) {
       return res.status(403).json({ error: "Only Super Admin / Admin can edit branches" });
     }
     const id = Number(req.params.id);
-    const { name, lat, lng, radius_meters } = req.body || {};
+    const { name, lat, lng, radius_meters, address, city, state, wifi_enabled, wifi_ssids } = req.body || {};
+    const wifiPayload = Array.isArray(wifi_ssids)
+      ? JSON.stringify(wifi_ssids.map((x) => String(x).trim()).filter(Boolean))
+      : null;
     db.prepare(
       `UPDATE branches SET
         name = COALESCE(?, name),
         lat = COALESCE(?, lat),
         lng = COALESCE(?, lng),
-        radius_meters = COALESCE(?, radius_meters)
+        radius_meters = COALESCE(?, radius_meters),
+        address = COALESCE(?, address),
+        city = COALESCE(?, city),
+        state = COALESCE(?, state),
+        wifi_enabled = CASE WHEN ? IS NULL THEN wifi_enabled ELSE ? END,
+        wifi_ssids = COALESCE(?, wifi_ssids)
        WHERE id = ?`
-    ).run(name || null, lat ?? null, lng ?? null, radius_meters ?? null, id);
+    ).run(
+      name || null,
+      lat ?? null,
+      lng ?? null,
+      radius_meters ?? null,
+      address !== undefined ? String(address || "") : null,
+      city !== undefined ? String(city || "") : null,
+      state !== undefined ? String(state || "") : null,
+      wifi_enabled === undefined ? null : (wifi_enabled ? 1 : 0),
+      wifi_enabled === undefined ? null : (wifi_enabled ? 1 : 0),
+      wifiPayload,
+      id
+    );
     const b = db.prepare("SELECT * FROM branches WHERE id = ?").get(id);
     if (!b) return res.status(404).json({ error: "Not found" });
     insertAudit(req.currentUser.id, "branch_update", "branch", id, {});
     scheduleBranchSync(db, id);
     appsScriptScheduleBranch(db, id);
     res.json({ branch: b });
+  });
+  router.delete("/branches/:id", attachUser, requirePerm("branches:write"), (req, res) => {
+    if (!isOrgWide(req.currentUser)) {
+      return res.status(403).json({ error: "Only Super Admin / Admin can delete branches" });
+    }
+    const id = Number(req.params.id);
+    const row = db.prepare("SELECT id, name FROM branches WHERE id = ?").get(id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    const usersCount = Number(
+      db.prepare("SELECT COUNT(*) AS c FROM users WHERE branch_id = ? AND deleted_at IS NULL").get(id).c
+    );
+    if (usersCount > 0) {
+      return res.status(400).json({ error: "Cannot delete a branch assigned to active users" });
+    }
+    db.prepare("DELETE FROM branches WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "branch_delete", "branch", id, { name: row.name });
+    res.json({ ok: true, id });
   });
 
   router.get("/users", attachUser, (req, res) => {
@@ -2595,6 +2950,11 @@ function createApiRouter(db) {
     if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
     }
+    console.log("[users.update] request", {
+      actorId: req.currentUser?.id,
+      userId: id,
+      body: req.body || {},
+    });
     const {
       full_name,
       login_id,
@@ -2698,10 +3058,15 @@ function createApiRouter(db) {
     insertAudit(req.currentUser.id, "user_update", "user", id, {});
     scheduleUserSync(db, id);
     appsScriptScheduleUser(db, id);
+    console.log("[users.update] db_response", { id: u?.id, login_id: u?.login_id, active: u?.active });
     res.json({ user: u });
   };
   router.patch("/users/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.patch("/staff/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.patch("/employees/:id", attachUser, requirePerm("users:update"), patchUserHandler);
   router.put("/staff/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.put("/users/:id", attachUser, requirePerm("users:update"), patchUserHandler);
+  router.put("/employees/:id", attachUser, requirePerm("users:update"), patchUserHandler);
   router.delete("/staff/:id", attachUser, requirePerm("users:update"), (req, res) => {
     const id = Number(req.params.id);
     const target = db.prepare("SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
@@ -2709,9 +3074,59 @@ function createApiRouter(db) {
     if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
       return res.status(403).json({ error: "Forbidden" });
     }
+    console.log("[users.delete] request", { actorId: req.currentUser?.id, userId: id });
     db.prepare("UPDATE users SET active = 0, deleted_at = datetime('now') WHERE id = ?").run(id);
     insertAudit(req.currentUser.id, "staff_delete", "user", id, {});
+    console.log("[users.delete] db_response", { id, deleted: true });
     res.json({ ok: true, id });
+  });
+  router.delete("/users/:id", attachUser, requirePerm("users:update"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    console.log("[users.delete] request", { actorId: req.currentUser?.id, userId: id });
+    db.prepare("UPDATE users SET active = 0, deleted_at = datetime('now') WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "staff_delete", "user", id, {});
+    console.log("[users.delete] db_response", { id, deleted: true });
+    res.json({ ok: true, id });
+  });
+  router.delete("/employees/:id", attachUser, requirePerm("users:update"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    console.log("[users.delete] request", { actorId: req.currentUser?.id, userId: id });
+    db.prepare("UPDATE users SET active = 0, deleted_at = datetime('now') WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "staff_delete", "user", id, {});
+    console.log("[users.delete] db_response", { id, deleted: true });
+    res.json({ ok: true, id });
+  });
+  router.post("/users/:id/lock", attachUser, requirePerm("users:update"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    db.prepare("UPDATE users SET active = 0 WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "user_lock", "user", id, {});
+    res.json({ ok: true, id, active: 0 });
+  });
+  router.post("/users/:id/unlock", attachUser, requirePerm("users:update"), (req, res) => {
+    const id = Number(req.params.id);
+    const target = db.prepare("SELECT id, role FROM users WHERE id = ?").get(id);
+    if (!target) return res.status(404).json({ error: "Not found" });
+    if (target.role === ROLES.SUPER_ADMIN && req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    db.prepare("UPDATE users SET active = 1, deleted_at = NULL WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "user_unlock", "user", id, {});
+    res.json({ ok: true, id, active: 1 });
   });
   router.post("/staff/:id/photo", attachUser, requirePerm("users:update"), uploadFace.single("photo"), (req, res) => {
     const id = Number(req.params.id);
@@ -2759,6 +3174,114 @@ function createApiRouter(db) {
       return res.status(403).json({ error: "Forbidden" });
     }
     res.json({ roles: listRolesMeta() });
+  });
+  router.get("/roles/custom", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const roles = db
+      .prepare(
+        `SELECT id, name, permissions_json, active, created_at, updated_at
+         FROM custom_roles ORDER BY id DESC`
+      )
+      .all()
+      .map((r) => ({
+        ...r,
+        permissions: (() => {
+          try {
+            return JSON.parse(r.permissions_json || "[]");
+          } catch {
+            return [];
+          }
+        })(),
+      }));
+    res.json({ roles });
+  });
+  router.post("/roles/custom", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const name = String(req.body?.name || "").trim();
+    const permissions = Array.isArray(req.body?.permissions)
+      ? req.body.permissions.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    if (!name) return res.status(400).json({ error: "name required" });
+    const info = db
+      .prepare(
+        `INSERT INTO custom_roles (name, permissions_json, active, created_by)
+         VALUES (?, ?, 1, ?)`
+      )
+      .run(name, JSON.stringify(permissions), req.currentUser.id);
+    insertAudit(req.currentUser.id, "role_create", "custom_role", info.lastInsertRowid, { name, permissions });
+    res.json({ role: db.prepare("SELECT * FROM custom_roles WHERE id = ?").get(info.lastInsertRowid) });
+  });
+  router.patch("/roles/custom/:id", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const id = Number(req.params.id);
+    const name = req.body?.name != null ? String(req.body.name).trim() : null;
+    const permissions = Array.isArray(req.body?.permissions)
+      ? req.body.permissions.map((x) => String(x).trim()).filter(Boolean)
+      : null;
+    const active = req.body?.active;
+    db.prepare(
+      `UPDATE custom_roles SET
+       name = COALESCE(?, name),
+       permissions_json = COALESCE(?, permissions_json),
+       active = CASE WHEN ? IS NULL THEN active ELSE ? END,
+       updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(
+      name || null,
+      permissions ? JSON.stringify(permissions) : null,
+      active === undefined ? null : (active ? 1 : 0),
+      active === undefined ? null : (active ? 1 : 0),
+      id
+    );
+    const role = db.prepare("SELECT * FROM custom_roles WHERE id = ?").get(id);
+    if (!role) return res.status(404).json({ error: "Not found" });
+    insertAudit(req.currentUser.id, "role_update", "custom_role", id, {});
+    res.json({ role });
+  });
+  router.delete("/roles/custom/:id", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const id = Number(req.params.id);
+    const r = db.prepare("SELECT id FROM custom_roles WHERE id = ?").get(id);
+    if (!r) return res.status(404).json({ error: "Not found" });
+    db.prepare("DELETE FROM user_role_assignments WHERE custom_role_id = ?").run(id);
+    db.prepare("DELETE FROM custom_roles WHERE id = ?").run(id);
+    insertAudit(req.currentUser.id, "role_delete", "custom_role", id, {});
+    res.json({ ok: true, id });
+  });
+  router.post("/roles/custom/:id/assign-user", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const roleId = Number(req.params.id);
+    const userId = Number(req.body?.user_id || 0);
+    if (!userId) return res.status(400).json({ error: "user_id required" });
+    const role = db.prepare("SELECT id, active FROM custom_roles WHERE id = ?").get(roleId);
+    if (!role || !role.active) return res.status(404).json({ error: "Role not found" });
+    const user = db.prepare("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL").get(userId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    db.prepare(
+      `INSERT OR REPLACE INTO user_role_assignments (user_id, custom_role_id, assigned_by, assigned_at)
+       VALUES (?, ?, ?, datetime('now'))`
+    ).run(userId, roleId, req.currentUser.id);
+    insertAudit(req.currentUser.id, "role_assign", "user", userId, { roleId });
+    res.json({ ok: true, user_id: userId, custom_role_id: roleId });
+  });
+  router.delete("/roles/custom/unassign-user/:userId", attachUser, (req, res) => {
+    if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Super Admin only" });
+    }
+    const userId = Number(req.params.userId);
+    db.prepare("DELETE FROM user_role_assignments WHERE user_id = ?").run(userId);
+    insertAudit(req.currentUser.id, "role_unassign", "user", userId, {});
+    res.json({ ok: true, user_id: userId });
   });
 
   router.get("/notices", attachUser, (req, res) => {
@@ -2864,25 +3387,37 @@ function createApiRouter(db) {
       return res.status(403).json({ error: "Forbidden" });
     }
     const s = readAppSettings();
-    res.json(s.attendance_wifi || { enabled: false, allowed_ssids: [] });
+    const cfg = s.attendance_wifi || { enabled: false, networks: [], allowed_ssids: [] };
+    res.json({
+      enabled: !!cfg.enabled,
+      networks: Array.isArray(cfg.networks) ? cfg.networks : [],
+      allowed_ssids: Array.isArray(cfg.allowed_ssids) ? cfg.allowed_ssids : [],
+    });
   });
   router.patch("/attendance/wifi-config", attachUser, requirePerm("settings:write"), (req, res) => {
     const cur = readAppSettings();
     const enabled = !!req.body?.enabled;
-    const ssids = Array.isArray(req.body?.allowed_ssids)
-      ? req.body.allowed_ssids.map((x) => String(x).trim()).filter(Boolean)
+    const networks = Array.isArray(req.body?.networks)
+      ? req.body.networks
+          .map((n) => ({
+            ssid: String(n?.ssid || "").trim(),
+            password: String(n?.password || "").trim(),
+          }))
+          .filter((n) => n.ssid)
       : [];
+    const ssids = networks.map((n) => n.ssid);
     const next = {
       ...cur,
       attendance_wifi: {
         enabled,
+        networks,
         allowed_ssids: ssids,
       },
     };
     writeAppSettings(next);
     insertAudit(req.currentUser.id, "attendance_wifi_update", "settings", "attendance_wifi", {
       enabled,
-      count: ssids.length,
+      count: networks.length,
     });
     res.json(next.attendance_wifi);
   });
@@ -3117,21 +3652,30 @@ function createApiRouter(db) {
   function createEmployeeHandler(req, res) {
     const { name, mobile, password, role, staff_sub_type, department, email, login_id, dob, joining_date, address, account_number, ifsc, bank_name, branch_id } =
       req.body || {};
-    if (!name || !password) {
-      return res.status(400).json({ error: "name and password required" });
+    if (!name || !password || !role || !mobile) {
+      return res.status(400).json({ error: "name, mobile, password, role required" });
     }
+    console.log("[employees.create] request", {
+      actorId: req.currentUser?.id,
+      name,
+      role,
+      branch_id,
+      login_id,
+      email,
+    });
     const mapped = normalizeRoleInput(role);
     if (!mapped) {
       return res.status(400).json({ error: "role must be valid role id" });
     }
     const roleCreateCheck = assertRoleAssignableOnCreate(req.currentUser, mapped);
     if (!roleCreateCheck.ok) return res.status(roleCreateCheck.status).json({ error: roleCreateCheck.error });
-    const branchId =
-      branch_id != null && branch_id !== ""
-        ? Number(branch_id)
-        : req.currentUser.branch_id != null
-          ? req.currentUser.branch_id
-          : null;
+    if (branch_id == null || String(branch_id).trim() === "") {
+      return res.status(400).json({ error: "branch_id is required" });
+    }
+    const branchId = Number(branch_id);
+    if (branchId == null || Number.isNaN(Number(branchId))) {
+      return res.status(400).json({ error: "branch_id is required" });
+    }
     if (isBranchScoped(req.currentUser) && Number(req.currentUser.branch_id) !== Number(branchId)) {
       return res.status(403).json({ error: "Users must be assigned to your branch" });
     }
@@ -3139,10 +3683,11 @@ function createApiRouter(db) {
       email && String(email).trim()
         ? String(email).trim()
         : `emp${Date.now()}@prakriti.local`;
-    const loginId =
-      login_id && String(login_id).trim()
-        ? String(login_id).trim()
-        : generateBranchEmployeeId(branchId);
+    const requestedLoginId = login_id && String(login_id).trim() ? String(login_id).trim() : null;
+    if (requestedLoginId && isLoginIdTaken(requestedLoginId)) {
+      return res.status(409).json({ error: "Employee ID already exists" });
+    }
+    const loginId = requestedLoginId || generateUniqueBranchEmployeeId(branchId);
     const hash = bcrypt.hashSync(String(password), 10);
     try {
       const info = db
@@ -3177,6 +3722,7 @@ function createApiRouter(db) {
       insertAudit(req.currentUser.id, "employee_create", "user", u.id, { email: u.email });
       scheduleUserSync(db, u.id);
       appsScriptScheduleUser(db, u.id);
+      console.log("[employees.create] db_response", { id: u.id, email: u.email, login_id: u.login_id });
       res.json({
         employee: {
           id: u.id,
@@ -3196,8 +3742,14 @@ function createApiRouter(db) {
         },
       });
     } catch (e) {
-      if (String(e.message).includes("UNIQUE")) {
+      if (String(e.message).includes("users.login_id")) {
+        return res.status(409).json({ error: "Employee ID already exists" });
+      }
+      if (String(e.message).includes("users.email")) {
         return res.status(409).json({ error: "Email already exists" });
+      }
+      if (String(e.message).includes("UNIQUE")) {
+        return res.status(409).json({ error: "Duplicate employee record" });
       }
       throw e;
     }
@@ -3206,51 +3758,6 @@ function createApiRouter(db) {
   router.post("/employees", attachUser, requirePerm("users:create"), createEmployeeHandler);
   router.post("/staff", attachUser, requirePerm("users:create"), createEmployeeHandler);
 
-  router.get("/crm/leads", attachUser, requirePerm("crm:read"), (req, res) => {
-    const rows = db
-      .prepare(
-        `SELECT l.id, l.full_name, l.phone, l.email, l.company, l.status, l.notes, l.created_at,
-                u.full_name AS created_by_name
-         FROM crm_leads l
-         LEFT JOIN users u ON u.id = l.created_by
-         ORDER BY l.id DESC
-         LIMIT 500`
-      )
-      .all();
-    res.json({ leads: rows });
-  });
-
-  router.post("/crm/leads", attachUser, requirePerm("crm:write"), (req, res) => {
-    const { full_name, phone, email, company, status, notes } = req.body || {};
-    if (!full_name || !String(full_name).trim()) {
-      return res.status(400).json({ error: "full_name required" });
-    }
-    const info = db
-      .prepare(
-        `INSERT INTO crm_leads (full_name, phone, email, company, status, notes, created_by)
-         VALUES (?,?,?,?,?,?,?)`
-      )
-      .run(
-        String(full_name).trim(),
-        phone ? String(phone).trim() : null,
-        email ? String(email).trim() : null,
-        company ? String(company).trim() : null,
-        status && String(status).trim() ? String(status).trim() : "new",
-        notes != null ? String(notes) : null,
-        req.currentUser.id
-      );
-    const row = db
-      .prepare(
-        `SELECT l.id, l.full_name, l.phone, l.email, l.company, l.status, l.notes, l.created_at,
-                u.full_name AS created_by_name
-         FROM crm_leads l
-         LEFT JOIN users u ON u.id = l.created_by
-         WHERE l.id = ?`
-      )
-      .get(info.lastInsertRowid);
-    insertAudit(req.currentUser.id, "crm_lead_create", "crm_lead", row.id, { full_name: row.full_name });
-    res.json({ lead: row });
-  });
 
   router.get("/logs", attachUser, (req, res) => {
     if (req.currentUser.role !== ROLES.SUPER_ADMIN) {
@@ -3758,7 +4265,7 @@ function createApiRouter(db) {
     const rel = `/uploads/documents/${req.file.filename}`;
     const info = db
       .prepare(
-        `INSERT INTO employee_documents (user_id, doc_type, file_name, file_path, verified) VALUES (?,?,?,?,0)`
+        `INSERT INTO employee_documents (user_id, doc_type, file_name, file_path, verified, doc_status) VALUES (?,?,?,?,0,'pending')`
       )
       .run(targetUserId, doc_type, req.file.originalname || req.file.filename, rel);
     const row = db.prepare("SELECT * FROM employee_documents WHERE id = ?").get(info.lastInsertRowid);
@@ -3771,11 +4278,21 @@ function createApiRouter(db) {
       return res.status(403).json({ error: "Forbidden" });
     }
     const id = Number(req.params.id);
-    const { verified, verifier_notes } = req.body || {};
-    const v = verified ? 1 : 0;
+    const { verified, status, verifier_notes } = req.body || {};
+    let nextStatus = "pending";
+    if (status === "approved" || status === "rejected" || status === "pending") {
+      nextStatus = String(status);
+    } else if (verified === true || verified === 1) {
+      nextStatus = "approved";
+    } else if (verified === false || verified === 0) {
+      nextStatus = "rejected";
+    }
+    const v = nextStatus === "approved" ? 1 : 0;
     db.prepare(
-      `UPDATE employee_documents SET verified = ?, verified_by = ?, verified_at = datetime('now'), verifier_notes = ? WHERE id = ?`
-    ).run(v, req.currentUser.id, verifier_notes != null ? String(verifier_notes) : null, id);
+      `UPDATE employee_documents
+       SET verified = ?, doc_status = ?, verified_by = ?, verified_at = datetime('now'), verifier_notes = ?
+       WHERE id = ?`
+    ).run(v, nextStatus, req.currentUser.id, verifier_notes != null ? String(verifier_notes) : null, id);
     const row = db.prepare("SELECT * FROM employee_documents WHERE id = ?").get(id);
     if (!row) {
       return res.status(404).json({ error: "Not found" });

@@ -27,6 +27,7 @@ type AttRow = {
   verification_in?: string | null
 }
 type WarnRow = { type: string; severity: string; message: string }
+type Branch = { id: number; name: string }
 
 export function AttendancePage() {
   const { user } = useAuth()
@@ -41,9 +42,10 @@ export function AttendancePage() {
   const [loading, setLoading] = useState(true)
   const [punchMsg, setPunchMsg] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [filterMethod, setFilterMethod] = useState<string>('')
-  const [filterPhoto, setFilterPhoto] = useState<'all' | 'with' | 'without'>('all')
+  const [filterStatus, setFilterStatus] = useState<string>('')
+  const [filterBranchId, setFilterBranchId] = useState<string>('')
   const [search, setSearch] = useState('')
+  const [branches, setBranches] = useState<Branch[]>([])
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [wifiSsid, setWifiSsid] = useState('')
   const [warnings, setWarnings] = useState<WarnRow[]>([])
@@ -133,11 +135,37 @@ export function AttendancePage() {
     setErr(null)
     setLoading(true)
     try {
-      const q = `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
-      const data = await api<{ records: AttRow[] }>('/attendance/history' + q)
-      setRecords(data.records || [])
+      const params = new URLSearchParams()
+      params.set('from', from)
+      params.set('to', to)
+      if (filterStatus) params.set('status', filterStatus)
+      if (filterBranchId) params.set('branchId', filterBranchId)
+      const q = `?${params.toString()}`
+      let rows: AttRow[] = []
+      try {
+        const data = await api<{ records: AttRow[] }>('/attendance/history' + q)
+        rows = data.records || []
+        console.log('[attendance] /attendance/history', { query: q, count: rows.length })
+      } catch (historyErr) {
+        console.warn('[attendance] history failed, trying /attendance', historyErr)
+        const data2 = await api<{ attendance: AttRow[] }>('/attendance' + q)
+        rows = (data2.attendance || []).map((r) => ({
+          ...r,
+          work_date: (r as unknown as { workDate?: string }).workDate || r.work_date,
+          user_id: (r as unknown as { userId?: number }).userId || r.user_id,
+          full_name: (r as unknown as { userName?: string }).userName || r.full_name,
+          punch_in_at: (r as unknown as { checkIn?: string | null }).checkIn || r.punch_in_at,
+          punch_out_at: (r as unknown as { checkOut?: string | null }).checkOut || r.punch_out_at,
+        }))
+        console.log('[attendance] /attendance fallback', { query: q, count: rows.length })
+      }
+      setRecords(rows)
       const w = await api<{ warnings: WarnRow[] }>('/warnings/me')
       setWarnings(w.warnings || [])
+      if (canAll) {
+        const b = await api<{ branches: Branch[] }>('/branches')
+        setBranches(b.branches || [])
+      }
       await refreshIdentityHint()
     } catch (e) {
       setErr((e as Error).message)
@@ -146,7 +174,7 @@ export function AttendancePage() {
     } finally {
       setLoading(false)
     }
-  }, [from, to, refreshIdentityHint])
+  }, [from, to, filterStatus, filterBranchId, refreshIdentityHint, canAll])
 
   useEffect(() => {
     load()
@@ -162,15 +190,8 @@ export function AttendancePage() {
   const myToday = todayRows.find((r) => r.user_id === user?.id)
 
   let filtered = records
-  if (filterMethod) {
-    filtered = filtered.filter(
-      (r) => r.punch_method_in === filterMethod || r.punch_method_out === filterMethod
-    )
-  }
-  if (filterPhoto === 'with') {
-    filtered = filtered.filter((r) => !!r.punch_in_photo)
-  } else if (filterPhoto === 'without') {
-    filtered = filtered.filter((r) => !r.punch_in_photo)
+  if (filterStatus) {
+    filtered = filtered.filter((r) => String(r.status || '').toLowerCase() === filterStatus.toLowerCase())
   }
   if (search.trim()) {
     const q = search.trim().toLowerCase()
@@ -425,7 +446,7 @@ export function AttendancePage() {
   return (
     <div className="mx-auto max-w-[1200px] space-y-6 pb-8">
       <div>
-        <h1 className="text-2xl font-bold text-[#1f5e3b]">Attendance</h1>
+        <h1 className="text-2xl font-bold text-[#1f5e3b]">Attendance Dashboard</h1>
         <p className="text-sm text-[#1f5e3b]/70">
           Choose GPS, office location, face capture, or fingerprint (device-ready). When your organization enables
           passkeys, you verify with your device PIN or biometrics before each punch. Photo history appears in the table
@@ -666,31 +687,27 @@ export function AttendancePage() {
             />
           </label>
           <label className="text-sm">
-            <span className="mb-1 block font-medium text-[#1f5e3b]">Method</span>
-            <select
-              value={filterMethod}
-              onChange={(e) => setFilterMethod(e.target.value)}
-              className="rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm"
-            >
+            <span className="mb-1 block font-medium text-[#1f5e3b]">Status</span>
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm">
               <option value="">All</option>
-              <option value="gps">GPS</option>
-              <option value="office">Office</option>
-              <option value="face">Face</option>
-              <option value="fingerprint">Fingerprint</option>
+              <option value="present">Present</option>
+              <option value="late">Late</option>
+              <option value="absent">Absent</option>
             </select>
           </label>
-          <label className="text-sm">
-            <span className="mb-1 block font-medium text-[#1f5e3b]">Photo</span>
-            <select
-              value={filterPhoto}
-              onChange={(e) => setFilterPhoto(e.target.value as 'all' | 'with' | 'without')}
-              className="rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm"
-            >
-              <option value="all">All</option>
-              <option value="with">With check-in photo</option>
-              <option value="without">Without photo</option>
-            </select>
-          </label>
+          {canAll && (
+            <label className="text-sm">
+              <span className="mb-1 block font-medium text-[#1f5e3b]">Branch</span>
+              <select value={filterBranchId} onChange={(e) => setFilterBranchId(e.target.value)} className="rounded-xl border border-[#1f5e3b]/15 px-3 py-2 text-sm">
+                <option value="">All</option>
+                {branches.map((b) => (
+                  <option key={b.id} value={String(b.id)}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="text-sm">
             <span className="mb-1 block font-medium text-[#1f5e3b]">Search</span>
             <input
@@ -710,8 +727,8 @@ export function AttendancePage() {
           <button
             type="button"
             onClick={() => {
-              setFilterMethod('')
-              setFilterPhoto('all')
+              setFilterStatus('')
+              setFilterBranchId('')
               setSearch('')
             }}
             className="rounded-xl border border-[#1f5e3b]/20 bg-white px-4 py-2 text-sm font-semibold text-[#1f5e3b]"
@@ -737,9 +754,10 @@ export function AttendancePage() {
                   <th className="py-2 pr-3">Date</th>
                   {canAll && <th className="py-2 pr-3">Employee</th>}
                   <th className="py-2 pr-3">Status</th>
-                  <th className="py-2 pr-3">Method</th>
                   <th className="py-2 pr-3">In</th>
                   <th className="py-2 pr-3">Out</th>
+                  <th className="py-2 pr-3">Total Hours</th>
+                  <th className="py-2 pr-3">Late</th>
                   <th className="py-2">Photo</th>
                 </tr>
               </thead>
@@ -749,16 +767,18 @@ export function AttendancePage() {
                     <td className="py-2 pr-3">{r.work_date}</td>
                     {canAll && <td className="py-2 pr-3">{r.full_name || '—'}</td>}
                     <td className="py-2 pr-3 capitalize">{r.status}</td>
-                    <td className="py-2 pr-3 text-xs">
-                      {r.punch_method_in || '—'}
-                      {r.verification_in ? ` (${r.verification_in})` : ''}
-                    </td>
                     <td className="py-2 pr-3 text-xs text-[#14261a]/80">
                       {r.punch_in_at ? new Date(r.punch_in_at).toLocaleString() : '—'}
                     </td>
                     <td className="py-2 pr-3 text-xs text-[#14261a]/80">
                       {r.punch_out_at ? new Date(r.punch_out_at).toLocaleString() : '—'}
                     </td>
+                    <td className="py-2 pr-3 text-xs text-[#14261a]/80">
+                      {r.punch_in_at && r.punch_out_at
+                        ? ((new Date(r.punch_out_at).getTime() - new Date(r.punch_in_at).getTime()) / 36e5).toFixed(2)
+                        : '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-xs font-semibold">{String(r.status).toLowerCase() === 'late' ? 'Yes' : 'No'}</td>
                     <td className="py-2">
                       {r.punch_in_photo ? (
                         <button

@@ -19,8 +19,6 @@ const CompanyPage = lazy(() => import('./pages/CompanyPage').then((m) => ({ defa
 const GuidePage = lazy(() => import('./pages/GuidePage').then((m) => ({ default: m.GuidePage })))
 const KioskPage = lazy(() => import('./pages/KioskPage').then((m) => ({ default: m.KioskPage })))
 const TrashPage = lazy(() => import('./pages/TrashPage').then((m) => ({ default: m.TrashPage })))
-const CrmPage = lazy(() => import('./pages/CrmPage').then((m) => ({ default: m.CrmPage })))
-const ReportsPage = lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })))
 const IdentityEnrollmentPage = lazy(() =>
   import('./pages/IdentityEnrollmentPage').then((m) => ({ default: m.IdentityEnrollmentPage }))
 )
@@ -87,23 +85,15 @@ export default function App() {
             }
           />
           <Route
-            path="reports"
-            element={
-              <Suspense fallback={<PageSkeleton rows={5} />}>
-                <ReportsPage />
-              </Suspense>
-            }
-          />
-          <Route
-            path="crm"
+            path="employees"
             element={
               <Suspense fallback={<PageSkeleton rows={6} />}>
-                <CrmPage />
+                <EmployeesPage />
               </Suspense>
             }
           />
           <Route
-            path="employees"
+            path="employees/:id"
             element={
               <Suspense fallback={<PageSkeleton rows={6} />}>
                 <EmployeesPage />

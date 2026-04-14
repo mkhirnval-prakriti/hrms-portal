@@ -167,6 +167,8 @@ function listRolesMeta() {
 
 function can(user, permission) {
   if (!user || !user.role) return false;
+  const extra = Array.isArray(user.custom_permissions) ? user.custom_permissions : [];
+  if (extra.includes("*") || extra.includes(permission)) return true;
   const keys = ROLE_MATRIX[user.role];
   if (!keys) return false;
   if (keys.includes("*")) return true;

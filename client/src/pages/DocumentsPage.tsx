@@ -12,6 +12,7 @@ type DocRow = {
   file_name: string
   file_path: string
   verified: number
+  doc_status?: 'pending' | 'approved' | 'rejected'
   user_name?: string
 }
 
@@ -48,10 +49,10 @@ export function DocumentsPage() {
   })
 
   const verifyMut = useMutation({
-    mutationFn: async ({ id, verified }: { id: number; verified: boolean }) => {
+    mutationFn: async ({ id, status }: { id: number; status: 'approved' | 'rejected' | 'pending' }) => {
       await api(`/documents/${id}/verify`, {
         method: 'PATCH',
-        body: JSON.stringify({ verified, verifier_notes: verified ? 'Verified in HRMS' : 'Unverified' }),
+        body: JSON.stringify({ status, verifier_notes: status === 'approved' ? 'Approved in HRMS' : 'Rejected in HRMS' }),
       })
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: docsKey }),
@@ -69,6 +70,7 @@ export function DocumentsPage() {
     if (!q) return true
     return `${d.doc_type} ${d.file_name} ${d.user_name || ''} ${d.user_id}`.toLowerCase().includes(q)
   })
+  const pendingCount = docs.filter((d) => (d.doc_status || 'pending') === 'pending').length
 
   return (
     <div className="mx-auto max-w-[1000px] space-y-6 pb-8">
@@ -119,7 +121,7 @@ export function DocumentsPage() {
 
       <div className="ph-card rounded-2xl p-6">
         <div className="flex justify-between">
-          <h2 className="text-lg font-semibold text-[#1f5e3b]">Documents</h2>
+          <h2 className="text-lg font-semibold text-[#1f5e3b]">Documents {canVerify ? `(Pending: ${pendingCount})` : ''}</h2>
           <div className="flex items-center gap-2">
             <input
               value={search}
@@ -172,7 +174,7 @@ export function DocumentsPage() {
                     <p className="text-xs text-[#1f5e3b]/75">Employee: {d.user_name}</p>
                   )}
                   <p className="text-xs text-[#14261a]/70">
-                    Status: {Number(d.verified) === 1 ? 'Verified' : 'Pending review'}
+                    Status: {(d.doc_status || (Number(d.verified) === 1 ? 'approved' : 'pending')).toUpperCase()}
                   </p>
                   <a
                     href={d.file_path}
@@ -185,24 +187,24 @@ export function DocumentsPage() {
                 </div>
                 {canVerify && (
                   <div className="flex gap-2">
-                    {Number(d.verified) !== 1 && (
+                    {(d.doc_status || 'pending') !== 'approved' && (
                       <button
                         type="button"
-                        onClick={() => verifyMut.mutate({ id: d.id, verified: true })}
+                        onClick={() => verifyMut.mutate({ id: d.id, status: 'approved' })}
                         disabled={verifyMut.isPending}
                         className="rounded-lg bg-[#2e7d32] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                       >
-                        Mark verified
+                        Approve
                       </button>
                     )}
-                    {Number(d.verified) === 1 && (
+                    {(d.doc_status || 'pending') !== 'rejected' && (
                       <button
                         type="button"
-                        onClick={() => verifyMut.mutate({ id: d.id, verified: false })}
+                        onClick={() => verifyMut.mutate({ id: d.id, status: 'rejected' })}
                         disabled={verifyMut.isPending}
-                        className="rounded-lg border border-[#8d6e63]/40 px-3 py-1.5 text-xs text-[#5d4037] disabled:opacity-50"
+                        className="rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-700 disabled:opacity-50"
                       >
-                        Revoke
+                        Reject
                       </button>
                     )}
                   </div>
