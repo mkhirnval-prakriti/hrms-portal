@@ -154,6 +154,11 @@ app.use(
   express.static(path.join(__dirname, "legacy"), { index: "index.html" })
 );
 
+app.get(/^\/portal\/?$/, (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  res.redirect(302, "/app/");
+});
+
 /** React (Vite) build — served before root `public/` so `/` is the HRMS SPA. */
 const staticAppDir = path.join(__dirname, "dist");
 const appIndex = path.join(staticAppDir, "index.html");
